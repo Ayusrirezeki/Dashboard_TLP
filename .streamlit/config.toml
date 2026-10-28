@@ -1,0 +1,19 @@
+[theme]
+base = "dark"
+primaryColor = "#3b8beb"
+backgroundColor = "#0d1117"
+secondaryBackgroundColor = "#161b22"
+textColor = "#e6edf3"
+font = "sans serif"
+borderColor = "#30363d"
+showWidgetBorder = true
+baseRadius = "medium"
+
+[theme.sidebar]
+backgroundColor = "#0b0f14"
+
+[client]
+toolbarMode = "minimal"
+
+[server]
+runOnSave = true
