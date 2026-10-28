@@ -731,7 +731,7 @@ with tabs[5]:
         if shown[c].dtype == object:
             shown[c] = shown[c].astype("string")
     st.dataframe(shown, hide_index=True, width="stretch", height=560)
-  from pathlib import Path
+from pathlib import Path
 import streamlit as st
 
 APP_DIR = Path(__file__).resolve().parent
