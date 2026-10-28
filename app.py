@@ -731,3 +731,34 @@ with tabs[5]:
         if shown[c].dtype == object:
             shown[c] = shown[c].astype("string")
     st.dataframe(shown, hide_index=True, width="stretch", height=560)
+  from pathlib import Path
+import streamlit as st
+
+APP_DIR = Path(__file__).resolve().parent
+
+# --- TEMPELKAN KODE PENGECEKAN FILE OTOMATIS DI SINI ---
+# Tentukan nama file default yang Anda simpan di folder/GitHub
+default_file_path = (
+    APP_DIR / "TLP Weekly Report.rar"
+)  # sesuaikan nama file Anda jika berupa .xlsb / .xlsx
+file_sumber = None
+
+if default_file_path.exists():
+  file_sumber = default_file_path
+# ------------------------------------------------------
+
+# Kode uploader bawaan Anda yang sudah ada sebelumnya:
+uploaded_file = st.file_uploader("Upload file...", type=["xlsb", "xlsx"])
+
+if uploaded_file is not None:
+  file_sumber = uploaded_file
+
+# Selanjutnya, gunakan variabel 'file_sumber' untuk dibaca oleh script Anda (misalnya dengan pyxlsb atau pandas)
+if file_sumber is not None:
+  # Proses membaca file dan menampilkan grafik...
+  pass
+else:
+  st.warning(
+      "Belum ada file data. Silakan letakkan file default di folder proyek."
+  )
+  
