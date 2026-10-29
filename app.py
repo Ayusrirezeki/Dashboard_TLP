@@ -60,9 +60,11 @@ REFRESH_EVERY = "15s"      # interval cek data baru untuk auto-refresh semua pen
 MAGENTA, YELLOW, RED, TOSCA = "#E20074", "#FFD100", "#ED1C24", "#00A3AD"
 PURPLE, ORANGE, TOSCA_2, PINK_2 = "#9B3D97", "#F7941D", "#4FD1D9", "#FF6FB5"
 PALETTE = [MAGENTA, YELLOW, TOSCA, RED, PURPLE, ORANGE, TOSCA_2, PINK_2]
-BG, CARD = "#0b0d17", "rgba(22,24,42,.86)"
-TEXT, TEXT_2, MUTED = "#f2f3f8", "#cfd2e3", "#9aa0bd"
-GRID = "rgba(190,195,230,0.12)"
+BG, CARD = "#ffffff", "#ffffff"
+GOLD = "#B88A00"           # kuning gelap untuk teks di atas latar putih
+TEXT, TEXT_2, MUTED = "#1a1c2e", "#3d4058", "#6b7090"
+GRID = "rgba(30,35,70,0.09)"
+BORDER, SHADOW = "rgba(20,25,60,.10)", "0 6px 18px rgba(20,25,60,.07)"
 FONT = 'Inter, "Segoe UI", system-ui, sans-serif'
 SERIES = {
     "A": ("A: Akumulasi TT open bulan sebelumnya", "#8a8fa8"),
@@ -126,17 +128,18 @@ SITE_STATUS = "Site Status (Up/Down/LTOA/ Plan to Relocate)"
 CATEGORIES = {
     "Access Issue": dict(
         sheet="List Access Issue", month="Month Open", status="Case Status (Open/Closed)",
-        toco=["GROUP1", "GROUP"], cause="Problem Type", root=["Header Case", "The Root Cause", "Root Cause", "Case"],
+        toco=["GROUP1", "GROUP"], owner="Site Owner", cause="Problem Type", root=["Case"],
         severity="Severity", aging="Aging Time (Days)", year="Year Open", site_id="Site ID",
         impact=[f"{SITE_STATUS}_1", SITE_STATUS],
         search=["Site ID", "Site ID IOH", "Site Name", "Remarks from FLM", "Case"], icon="🚧"),
     "Stolen": dict(
         sheet="List Stolen", month="Month Open", status="Status TT ToCo/OpCo", toco=["Toco Group Name"],
+        owner="Toco Owner",
         cause="Material Stolen", cause_rules=STOLEN_RULES, root=[], severity="TT Status [Critical/Major]",
         aging="Aging TT", year="Year Open", site_id="IOH ID", impact=[],
         search=["IOH ID", "Old Site ID", "Site Name", "TT IOH", "Material Stolen"], icon="🔓"),
     "TT CME": dict(
-        sheet="TT CME", month="Create Month", status="STATUS TT TLP", toco=["Owner"],
+        sheet="TT CME", month="Create Month", status="STATUS TT TLP", toco=["Owner"], owner="Owner",
         cause="Description", cause_rules=CME_RULES, root=[], severity="Severity", aging="Aging TT CLOSED",
         year=None, site_id="Site ID", impact=[], backlog="Backlog",
         search=["Site ID", "Site Name", "TT Number", "Description"], icon="🛠️"),
@@ -149,11 +152,7 @@ REGION_COL = "New Region"
 
 st.markdown(f"""
 <style>
-  .stApp {{background:
-      radial-gradient(900px 500px at 92% -8%, rgba(226,0,116,.30) 0%, rgba(226,0,116,0) 60%),
-      radial-gradient(800px 500px at -5% 105%, rgba(0,163,173,.22) 0%, rgba(0,163,173,0) 60%),
-      radial-gradient(600px 400px at 60% 40%, rgba(255,209,0,.05) 0%, rgba(255,209,0,0) 70%),
-      linear-gradient(160deg, #0a0b14 0%, #11131f 50%, #0d0f1a 100%); background-attachment: fixed;}}
+  .stApp {{background:#ffffff;}}
   [data-testid="stHeader"] {{background: transparent;}}
   .block-container {{padding-top: 1.1rem; padding-bottom: 2rem; max-width: 1640px;}}
 
@@ -164,29 +163,29 @@ st.markdown(f"""
               box-shadow:0 4px 18px rgba(226,0,116,.45);}}
   .hdr h1 {{font-size:1.45rem; margin:0; padding:0; color:{TEXT}; font-weight:800; letter-spacing:-.01em;}}
   .hdr .pill {{display:inline-block; margin-left:10px; padding:2px 10px; border-radius:999px; font-size:.68rem;
-              font-weight:700; color:{YELLOW}; background:rgba(255,209,0,.10); border:1px solid rgba(255,209,0,.5);
+              font-weight:700; color:{MAGENTA}; background:rgba(226,0,116,.07); border:1px solid rgba(226,0,116,.45);
               vertical-align:middle;}}
   .hdr .sub {{color:{MUTED}; font-size:.78rem; margin-top:2px;}}
   .lock {{display:inline-flex; align-items:center; gap:8px; padding:6px 12px; border-radius:10px; font-size:.78rem;
           color:{TEXT_2}; background:rgba(0,163,173,.12); border:1px solid rgba(0,163,173,.45);}}
-  .lock b {{color:#fff;}}
+  .lock b {{color:{TEXT};}}
   .lock .dot {{width:8px; height:8px; border-radius:50%; background:{TOSCA}; box-shadow:0 0 8px {TOSCA};
                animation: pulse 1.6s infinite;}}
   @keyframes pulse {{0%,100% {{opacity:1}} 50% {{opacity:.35}}}}
 
   .st-key-filterbar {{background:{CARD}; border:1px solid rgba(226,0,116,.28) !important; border-radius:16px;
-                      padding:10px 16px 4px 16px; box-shadow:0 8px 24px rgba(0,0,0,.35);}}
+                      padding:10px 16px 4px 16px; box-shadow:{SHADOW};}}
   [data-testid="stWidgetLabel"] p {{text-transform:uppercase; font-size:.68rem !important; font-weight:700;
                                    letter-spacing:.06em; color:{MUTED} !important;}}
-  [data-baseweb="select"] > div, .stTextInput input {{background:rgba(10,11,22,.9) !important;
+  [data-baseweb="select"] > div, .stTextInput input {{background:#ffffff !important;
                                    border-color:rgba(226,0,116,.32) !important;}}
   .st-key-filterbar [data-baseweb="select"] div, .st-key-filterbar input {{font-size:.8rem !important;}}
   .st-key-filterbar [data-baseweb="tag"] {{background:rgba(226,0,116,.85) !important;}}
   .st-key-filterbar [data-testid="stColumn"] {{min-width:0;}}
 
   .kpis {{display:grid; grid-template-columns:repeat(6, minmax(0,1fr)); gap:14px; margin:14px 0 6px;}}
-  .kpi {{background:{CARD}; border:1px solid rgba(255,255,255,.07); border-top:3px solid var(--c);
-         border-radius:14px; padding:14px 16px 12px; min-height:118px; box-shadow:0 8px 22px rgba(0,0,0,.3);}}
+  .kpi {{background:{CARD}; border:1px solid {BORDER}; border-top:3px solid var(--c);
+         border-radius:14px; padding:14px 16px 12px; min-height:118px; box-shadow:{SHADOW};}}
   .kpi .lbl {{font-size:.68rem; font-weight:700; letter-spacing:.06em; text-transform:uppercase; color:{TEXT_2};}}
   .kpi .val {{font-size:1.9rem; font-weight:800; color:var(--c); line-height:1.25; margin-top:6px;
               white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}}
@@ -194,7 +193,7 @@ st.markdown(f"""
   .kpi .sub {{font-size:.74rem; color:{MUTED}; margin-top:4px;}}
 
   [role="tablist"] {{gap:8px; flex-wrap:wrap; border-bottom:1px solid rgba(226,0,116,.2); padding-bottom:10px;}}
-  [data-testid="stTab"] {{background:rgba(22,24,42,.7); border:1px solid rgba(255,255,255,.08); border-radius:10px;
+  [data-testid="stTab"] {{background:#f4f5f9; border:1px solid {BORDER}; border-radius:10px;
                          padding:6px 14px !important; height:auto; transition:background .15s;}}
   [data-testid="stTab"] p {{font-size:.86rem; font-weight:600; color:{TEXT_2};}}
   [data-testid="stTab"]:hover {{background:rgba(226,0,116,.16);}}
@@ -204,18 +203,18 @@ st.markdown(f"""
   [role="tablist"] > :not([role="tab"]), [data-baseweb="tab-highlight"], [data-baseweb="tab-border"] {{display:none;}}
 
   .insights {{display:grid; grid-template-columns:repeat(4, minmax(0,1fr)); gap:14px; margin:6px 0 14px;}}
-  .ins {{background:{CARD}; border:1px solid rgba(255,255,255,.07); border-left:4px solid var(--c);
-         border-radius:14px; padding:14px 16px; box-shadow:0 8px 22px rgba(0,0,0,.3);}}
+  .ins {{background:{CARD}; border:1px solid {BORDER}; border-left:4px solid var(--c);
+         border-radius:14px; padding:14px 16px; box-shadow:{SHADOW};}}
   .ins h4 {{margin:0 0 6px; font-size:.92rem; color:{TEXT}; font-weight:700;}}
   .ins p {{margin:0; font-size:.83rem; line-height:1.5; color:{TEXT_2};}}
-  .ins b {{color:#fff;}}
+  .ins b {{color:{TEXT};}}
 
   .section {{font-size:1.02rem; font-weight:800; color:{TEXT}; margin:10px 0 6px; display:flex; gap:8px;
              align-items:center;}}
   .section .bar {{width:5px; height:20px; border-radius:3px;
                  background:linear-gradient({MAGENTA},{YELLOW});}}
-  [class*="st-key-card_"] {{background:{CARD}; border:1px solid rgba(255,255,255,.07) !important;
-                            border-radius:14px; padding:12px 14px 6px; box-shadow:0 8px 22px rgba(0,0,0,.3);}}
+  [class*="st-key-card_"] {{background:{CARD}; border:1px solid {BORDER} !important;
+                            border-radius:14px; padding:12px 14px 6px; box-shadow:{SHADOW};}}
   .ctitle {{font-size:.95rem; font-weight:700; color:{TEXT}; margin:2px 0 4px;}}
   .badge {{display:inline-block; font-size:.66rem; font-weight:700; padding:2px 7px; border-radius:6px;
            margin-right:8px; vertical-align:middle; color:var(--c); border:1px solid var(--c);
@@ -447,6 +446,13 @@ def _first(df: pd.DataFrame, names: list[str]) -> str | None:
     return next((n for n in names if n in df.columns and df[n].notna().any()), None)
 
 
+def _unify_case(s: pd.Series) -> pd.Series:
+    """Samakan ejaan yang hanya beda huruf besar/kecil (Dhost/DHOST/DHost) ke ejaan terbanyak."""
+    key = s.str.lower()
+    canon = s.groupby(key).agg(lambda v: v.value_counts().index[0])
+    return key.map(canon).astype("string")
+
+
 def _clean_root(s: pd.Series) -> pd.Series:
     s = s.str.replace(r"\s+", " ", regex=True).str.strip()
     s = s.str.replace(r"(?i)^kompesasi", "Kompensasi", regex=True)
@@ -465,10 +471,11 @@ def prepare(signature: str, _df: pd.DataFrame, cat: str) -> pd.DataFrame:
     df["_cat"] = cat
     df["_region"] = _col(df, REGION_COL)
     df["_toco"] = _col(df, _first(df, cfg["toco"])).map(toco_code)
+    df["_owner"] = _unify_case(_col(df, cfg.get("owner")))
     raw_cause = _col(df, cfg["cause"])
     df["_cause"] = classify(raw_cause, cfg["cause_rules"]) if cfg.get("cause_rules") else raw_cause
     root_col = _first(df, cfg["root"])
-    df["_root"] = _clean_root(_col(df, root_col)) if root_col else df["_cause"]
+    df["_root"] = _unify_case(_clean_root(_col(df, root_col))) if root_col else df["_cause"]
     df["_sev"] = _col(df, cfg["severity"]).str.title()
     aging = (pd.to_numeric(df[cfg["aging"]], errors="coerce") if cfg["aging"] in df.columns
              else pd.Series(float("nan"), index=df.index))
@@ -564,10 +571,10 @@ def dark(fig: go.Figure, height: int, legend_top: bool = True) -> go.Figure:
         margin=dict(l=8, r=8, t=46 if legend_top else 16, b=8),
         legend=dict(orientation="h", x=0.5, xanchor="center", y=1.04, yanchor="bottom",
                     font=dict(size=11, color=TEXT_2), itemsizing="constant", bgcolor="rgba(0,0,0,0)"),
-        hoverlabel=dict(bgcolor="#1b1d33", bordercolor=MAGENTA, font=dict(family=FONT, color=TEXT)),
+        hoverlabel=dict(bgcolor="#ffffff", bordercolor=MAGENTA, font=dict(family=FONT, color=TEXT)),
         bargap=0.28, barcornerradius=4,
     )
-    fig.update_xaxes(gridcolor=GRID, linecolor="rgba(200,200,230,.25)", zeroline=False, tickfont=dict(color=TEXT_2))
+    fig.update_xaxes(gridcolor=GRID, linecolor="rgba(30,35,70,.25)", zeroline=False, tickfont=dict(color=TEXT_2))
     fig.update_yaxes(gridcolor=GRID, linecolor="rgba(0,0,0,0)", zeroline=False, tickfont=dict(color=MUTED))
     return fig
 
@@ -607,7 +614,7 @@ def pie_3d(labels, values, colors, *, hole: float = 0.0, texts=None, height: int
     # Lapisan bayangan (pie lebih gelap sedikit di bawah) memberi kesan ketebalan.
     fig.add_trace(go.Pie(labels=labels, values=values, hole=hole, sort=False, direction="clockwise",
                          rotation=90, domain=dict(x=[0.02, 0.98], y=[0.0, 0.92]), showlegend=False,
-                         marker=dict(colors=["rgba(0,0,0,.55)"] * len(values), line=dict(width=0)),
+                         marker=dict(colors=["rgba(20,25,60,.16)"] * len(values), line=dict(width=0)),
                          textinfo="none", hoverinfo="skip"))
     fig.add_trace(go.Pie(
         labels=labels, values=values, hole=hole, sort=False, direction="clockwise", rotation=90,
@@ -616,7 +623,8 @@ def pie_3d(labels, values, colors, *, hole: float = 0.0, texts=None, height: int
         marker=dict(colors=colors, line=dict(color=BG, width=2)),
         text=texts, texttemplate="%{text}" if texts else "%{value:,.0f}<br>%{percent}",
         textposition="auto", insidetextorientation="horizontal",
-        textfont=dict(size=12, color="#ffffff", family=FONT),
+        # Teks gelap di irisan kuning, putih di irisan lain, agar tetap terbaca.
+        textfont=dict(size=12, color=[TEXT if c in (YELLOW, ORANGE) else "#ffffff" for c in colors], family=FONT),
         outsidetextfont=dict(size=11, color=TEXT_2),
         hovertemplate="<b>%{label}</b><br>%{value:,.0f} (%{percent})<extra></extra>",
     ))
@@ -631,14 +639,24 @@ def pie_3d(labels, values, colors, *, hole: float = 0.0, texts=None, height: int
     return fig
 
 
-def impact_donut(t: pd.DataFrame) -> go.Figure:
-    s = top_n(t["Total TT Impact Service Released"], 5)
+def impact_by_group(access: pd.DataFrame, owners: list[str] | None = None, top: int = 4) -> pd.Series:
+    """Total TT Impact Service Released per grup ToCo (Site Owner dikelompokkan lewat kolom GROUP1,
+    mis. Protelindo/STP/IBS/IFORTE -> PTI), hanya `top` grup teratas — seperti tabel di Excel."""
+    imp = access[access["_impact"] & access["_status"].isin(["Open", "Closed"])]
+    if owners:
+        imp = imp[imp["_owner"].isin(owners)]
+    s = imp[imp["_toco"] != "(Kosong)"].groupby("_toco").size().sort_values(ascending=False)
+    return s.head(top)
+
+
+def impact_donut(s: pd.Series) -> go.Figure:
+    """Donut Top 4 grup; persentase dihitung terhadap jumlah keempat grup (sama dengan pie Excel)."""
     if s.empty:
         return empty_fig("Belum ada TT impact service pada filter ini.")
     total = s.sum()
     texts = [f"{fmt(v)}<br>{k}<br>{pct(v / total * 100, 0)}" for k, v in s.items()]
     return pie_3d(list(s.index), list(s.values), PALETTE[:len(s)], hole=0.45, texts=texts,
-                  center=f"<b>{fmt(total)}</b><br><span style='font-size:11px'>TT Impact</span>")
+                  center=f"<b>{fmt(total)}</b><br><span style='font-size:11px'>TT Impact (Top {len(s)})</span>")
 
 
 def sow_pie(a: float, b: float, label_b: str, color_b: str) -> go.Figure:
@@ -740,7 +758,7 @@ def mttr_by(d: pd.DataFrame, col: str, top: int = 12, height: int = 360) -> go.F
         hovertemplate="<b>%{x}</b><br>MTTR: %{y:.2f} hari<br>%{customdata:,} tiket close<extra></extra>"))
     fig.add_hline(y=avg, line=dict(color=YELLOW, dash="dash", width=1.5),
                   annotation_text=f"Rata-rata {days(avg)} d", annotation_position="top right",
-                  annotation_font=dict(color=YELLOW, size=11))
+                  annotation_font=dict(color=GOLD, size=11))
     dark(fig, height, legend_top=False)
     fig.update_layout(showlegend=False, margin=dict(t=26),
                       yaxis=dict(range=[0, g["mean"].max() * 1.22], title="hari"),
@@ -777,13 +795,13 @@ def pareto(d: pd.DataFrame, col: str, top: int = 15) -> go.Figure:
                          hovertemplate="<b>%{x}</b><br>%{y:,} TT<extra></extra>"))
     fig.add_trace(go.Scatter(x=labels, y=cum.values, name="Kumulatif %", yaxis="y2",
                              mode="lines+markers+text", text=bar_text(cum.values, lambda v: pct(v, 0)),
-                             textposition="top center", textfont=dict(size=10, color=YELLOW), cliponaxis=False,
+                             textposition="top center", textfont=dict(size=10, color=GOLD), cliponaxis=False,
                              line=dict(color=YELLOW, width=2), marker=dict(size=7),
                              hovertemplate="<b>%{x}</b><br>Kumulatif: %{y:.1f}%<extra></extra>"))
     dark(fig, 400)
     fig.update_layout(yaxis=dict(range=[0, vc.max() * 1.6]),
                       yaxis2=dict(overlaying="y", side="right", range=[-60, 115], showgrid=False,
-                                  tickvals=[0, 50, 100], ticksuffix="%", tickfont=dict(color=YELLOW)),
+                                  tickvals=[0, 50, 100], ticksuffix="%", tickfont=dict(color=GOLD)),
                       xaxis=dict(tickangle=-30 if len(vc) > 8 else 0, tickfont=dict(size=10)))
     return fig
 
@@ -809,10 +827,14 @@ def monthly_status(d: pd.DataFrame) -> go.Figure:
     return fig
 
 
-def chart_card(key: str, badge: str, color: str, title: str, fig: go.Figure, exports: list | None = None) -> None:
+def chart_card(key: str, badge: str, color: str, title: str, fig, exports: list | None = None) -> None:
+    """Kartu grafik. `fig` boleh berupa fungsi: dipanggil di dalam kartu, sehingga widget
+    pengatur (mis. dropdown) bisa tampil di antara judul dan grafik."""
     with st.container(key=f"card_{key}"):
         st.markdown(f"<div class='ctitle'><span class='badge' style='--c:{color}'>{esc(badge)}</span>"
                     f"{esc(title)}</div>", unsafe_allow_html=True)
+        if callable(fig):
+            fig = fig()
         st.plotly_chart(fig, width="stretch", config={"displaylogo": False, "displayModeBar": False},
                         key=f"fig_{key}")
     if exports is not None:
@@ -871,7 +893,7 @@ def build_pptx(figures: list[tuple[str, go.Figure]], meta: dict, kpis: list[tupl
     accent.fill.solid(); accent.fill.fore_color.rgb = rgb(MAGENTA); accent.line.fill.background()
     text(s, Inches(1.1), Inches(1.9), Inches(11), Inches(1.0), "TLP Escalation Dashboard", 40, TEXT, True)
     text(s, Inches(1.1), Inches(2.85), Inches(11), Inches(0.6),
-         "Laporan Access Issue · Stolen · TT CME", 20, YELLOW)
+         "Laporan Access Issue · Stolen · TT CME", 20, MAGENTA)
     text(s, Inches(1.1), Inches(3.55), Inches(11), Inches(1.2), [
         f"Data diunggah oleh: {meta.get('uploader', '-')}",
         f"Update data terakhir: {meta.get('timestamp', '-')}  ·  File: {meta.get('filename', '-')}",
@@ -890,10 +912,10 @@ def build_pptx(figures: list[tuple[str, go.Figure]], meta: dict, kpis: list[tupl
     for i, (label, value, sub) in enumerate(kpis):
         x = Inches(0.6) + (card_w + gap) * (i % 3)
         y = top + (card_h + gap) * (i // 3)
-        color = [MAGENTA, TOSCA, RED, YELLOW, PURPLE, TOSCA_2][i % 6]
+        color = [MAGENTA, TOSCA, RED, GOLD, PURPLE, TOSCA][i % 6]
         box = s.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, x, y, card_w, card_h)
         box.adjustments[0] = 0.08
-        box.fill.solid(); box.fill.fore_color.rgb = rgb("#16182a"); box.line.color.rgb = rgb(color)
+        box.fill.solid(); box.fill.fore_color.rgb = rgb("#f6f7fb"); box.line.color.rgb = rgb(color)
         text(s, x + Inches(0.25), y + Inches(0.2), card_w - Inches(0.5), Inches(0.4), label.upper(), 12, TEXT_2, True)
         text(s, x + Inches(0.25), y + Inches(0.65), card_w - Inches(0.5), Inches(0.9), value, 30, color, True)
         text(s, x + Inches(0.25), y + Inches(1.55), card_w - Inches(0.5), Inches(0.5), sub, 12, MUTED)
@@ -962,7 +984,7 @@ with head_r:
     csv_slot = b3.empty()
     ppt_slot = b4.empty()
     if b5.button("↻ Reset Filter", width="stretch"):
-        for k in [k for k in st.session_state if str(k).startswith(FILTER_KEYS) or k in ("ae_range", "target_tlp")]:
+        for k in [k for k in st.session_state if str(k).startswith(FILTER_KEYS) or k in ("ae_range", "target_tlp", "g1_owner")]:
             st.session_state.pop(k, None)
         st.rerun()
 
@@ -1095,7 +1117,7 @@ KPI_LIST = [
     ("Top TLP Volume", str(top_toco[0]), f"{fmt(top_toco[1])} TT ({pct(top_toco[1] / max(total, 1) * 100)})"),
     ("Top Cause", str(top_cause[0]), f"{fmt(top_cause[1])} TT ({pct(top_cause[1] / max(total, 1) * 100)})"),
 ]
-KPI_COLORS = [MAGENTA, TOSCA, RED, YELLOW, PURPLE, TOSCA_2]
+KPI_COLORS = [MAGENTA, TOSCA, RED, GOLD, PURPLE, TOSCA]
 
 
 def kpi_html(label, value, sub, color, text_value=False) -> str:
@@ -1173,6 +1195,20 @@ with tabs[0]:
     stolen_f = apply_filters(prepared["Stolen"], FILTERS, status=False) if "Stolen" in prepared \
         else pd.DataFrame(columns=base.columns)
     imp_t = impact_table(access_f, stolen_f, SOW)
+    # Root cause (Grafik 4) selalu dari kolom "Case" di List Access Issue, mengikuti semua filter.
+    access_rc = apply_filters(prepared["Access Issue"], FILTERS) if "Access Issue" in prepared \
+        else pd.DataFrame(columns=base.columns)
+
+    def grafik1() -> go.Figure:
+        imp_rows = access_f[access_f["_impact"] & access_f["_status"].isin(["Open", "Closed"])]
+        owner_vc = imp_rows["_owner"].value_counts()
+        owner_vc = owner_vc[owner_vc.index != "(Kosong)"]
+        groups = imp_rows.groupby("_owner")["_toco"].agg(lambda g: " / ".join(g.value_counts().index))
+        sel = st.multiselect("Site Owner", list(owner_vc.index), key="g1_owner", placeholder="Semua Site Owner",
+                             format_func=lambda o: f"{o} → {groups.get(o, '-')} ({fmt(owner_vc.get(o))} TT)",
+                             help="Site Owner dikelompokkan ke grup ToCo (kolom GROUP1). Grafik menampilkan "
+                                  "Top 4 grup dengan Total TT Impact Service Released terbanyak.")
+        return impact_donut(impact_by_group(access_f, sel, 4))
 
     section("Impact Service & SoW per ToCo")
     tlp_opts = [t for t in imp_t.index if pd.notna(imp_t.loc[t, "SoW (A)"])] or list(imp_t.index)
@@ -1180,10 +1216,11 @@ with tabs[0]:
                           index=tlp_opts.index("TBG") if "TBG" in tlp_opts else 0) if tlp_opts else None
     a, b = st.columns(2)
     with a:
-        chart_card("g1", "Grafik 1", MAGENTA, "Impact Service Terbanyak per ToCo (Total TT Released)",
-                   impact_donut(imp_t), EXPORTS)
+        chart_card("g1", "Grafik 1", MAGENTA, "Impact Service Terbanyak per ToCo · Top 4 (Total TT Released)",
+                   grafik1, EXPORTS)
     with b:
-        chart_card("g4", "Grafik 4", YELLOW, "The Root Cause · Top 5", root_cause_pie(d), EXPORTS)
+        chart_card("g4", "Grafik 4", GOLD, "The Root Cause · Top 5 (kolom Case)", root_cause_pie(access_rc, 448),
+                   EXPORTS)
     a, b = st.columns(2)
     if target is not None:
         row = imp_t.loc[target]
@@ -1272,25 +1309,25 @@ with tabs[3]:
 with tabs[4]:
     a, b = st.columns(2)
     with a:
-        chart_card("root_pie", "TOP 5", YELLOW, "The Root Cause · Top 5 (header case)", root_cause_pie(d, 440))
+        chart_card("root_pie", "TOP 5", GOLD, "The Root Cause · Top 5 (kolom Case)", root_cause_pie(access_rc, 440))
     with b:
-        roots = d.loc[d["_root"] != "(Kosong)", "_root"].value_counts()
+        roots = access_rc.loc[access_rc["_root"] != "(Kosong)", "_root"].value_counts()
         tbl = roots.rename("Total").to_frame()
         tbl.index.name = "The Root Cause"
         with st.container(key="card_root_table"):
-            st.markdown("<div class='ctitle'><span class='badge' style='--c:#FFD100'>TABEL</span>"
+            st.markdown("<div class='ctitle'><span class='badge' style='--c:#B88A00'>TABEL</span>"
                         "The Root Cause</div>", unsafe_allow_html=True)
             st.dataframe(tbl, width="stretch", height=400)
-            blank = int((d["_root"] == "(Kosong)").sum())
+            blank = int((access_rc["_root"] == "(Kosong)").sum())
             if blank:
-                st.caption(f"{fmt(blank)} TT tidak memiliki isian root cause (kolom header case kosong).")
+                st.caption(f"{fmt(blank)} TT tidak memiliki isian root cause (kolom Case kosong).")
     a, b = st.columns(2)
     with a:
         chart_card("cause2", "CAUSE", TOSCA, "Top Cause", ranked(d, "_cause", 12, TOSCA, 420))
     with b:
         chart_card("cause_pareto", "CAUSE", PURPLE, "Pareto Cause", pareto(d, "_cause", 12))
-    st.caption("Root cause Access Issue diambil dari kolom header **Case** (atau *Header Case* / *Root Cause* bila "
-               "ada). Stolen & TT CME dikelompokkan otomatis dari teks bebas berdasarkan kata kunci.")
+    st.caption("The Root Cause diambil dari kolom **Case** di sheet List Access Issue (mengikuti semua filter). "
+               "Top Cause: Problem Type untuk Access Issue; Stolen & TT CME dikelompokkan otomatis dari teks.")
 
 # ---------- Data Explorer ----------
 with tabs[5]:
