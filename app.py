@@ -743,3 +743,228 @@ with tabs[5]:
         if shown[c].dtype == object:
             shown[c] = shown[c].astype("string")
     st.dataframe(shown, hide_index=True, width="stretch", height=560)
+
+import io
+import os
+from datetime import datetime
+import pandas as pd
+import plotly.express as px
+import streamlit as st
+from pptx import Presentation
+from pptx.util import Inches, Pt
+
+# --- KONFIGURASI TEMA INDOSAT & FOLDER DATA ---
+DATA_DIR = "shared_data"
+DATA_FILE = os.path.join(DATA_DIR, "latest_tlp_data.xlsx")
+META_FILE = os.path.join(DATA_DIR, "upload_log.json")
+
+os.makedirs(DATA_DIR, exist_ok=True)
+
+COLOR_PALETTE = ["#E20074", "#FFD100", "#ED1C24", "#00A3AD", "#58595B"]
+
+st.set_page_config(
+    page_title="Dashboard Monitoring TLP", layout="wide", page_icon="📊"
+)
+
+# --- SKRIP UNTUK GENERATE POWERPOINT PRESENTATION ---
+def create_powerpoint_presentation(
+    df_toco, df_root, df_impact, uploader_info, last_updated
+):
+    prs = Presentation()
+    # Atur ukuran slide 16:9
+    prs.slide_width = Inches(13.33)
+    prs.slide_height = Inches(7.5)
+    blank_slide_layout = prs.slide_layouts[6]
+
+    # --- SLIDE 1: JUDUL PRESENTASI ---
+    slide1 = prs.slides.add_slide(blank_slide_layout)
+    title_box = slide1.shapes.add_textbox(
+        Inches(1), Inches(2.5), Inches(11.33), Inches(2)
+    )
+    tf1 = title_box.text_frame
+    p1 = tf1.paragraphs[0]
+    p1.text = "Laporan Weekly Monitoring TLP & Impact Service"
+    p1.font.size = Pt(36)
+    p1.font.bold = True
+
+    p2 = tf1.add_paragraph()
+    p2.text = f"Terakhir Diperbarui: {last_updated} oleh {uploader_info}"
+    p2.font.size = Pt(18)
+
+    # --- HELPER FUNGSIONAL UNTUK EXPORT PLOTLY KE PPT ---
+    def add_chart_slide(fig, title_text):
+        slide = prs.slides.add_slide(blank_slide_layout)
+
+        # Judul Slide
+        t_box = slide.shapes.add_textbox(
+            Inches(0.8), Inches(0.5), Inches(11.5), Inches(1)
+        )
+        tf = t_box.text_frame
+        p = tf.paragraphs[0]
+        p.text = title_text
+        p.font.size = Pt(24)
+        p.font.bold = True
+
+        # Render Plotly ke Bytes Image PNG
+        img_bytes = fig.to_image(format="png", width=1000, height=550)
+        img_stream = io.BytesIO(img_bytes)
+
+        slide.shapes.add_picture(
+            img_stream,
+            Inches(1.5),
+            Inches(1.5),
+            width=Inches(10.33),
+            height=Inches(5.5),
+        )
+
+    # Convert Figures ke Slide
+    fig_toco = px.pie(
+        df_toco,
+        names="ToCO",
+        values="Total TT Impact Service Released",
+        title="Impact Service Released per ToCO",
+        color_discrete_sequence=COLOR_PALETTE,
+    )
+    add_chart_slide(fig_toco, "1. Impact Service Released Terbanyak")
+
+    fig_rc = px.pie(
+        df_root,
+        names="The Root Cause",
+        values="Total",
+        title="Top Root Cause Issues",
+        color_discrete_sequence=COLOR_PALETTE,
+    )
+    add_chart_slide(fig_rc, "2. Top Root Causes Analysis")
+
+    # Save to Bytes Buffer
+    ppt_buffer = io.BytesIO()
+    prs.save(ppt_buffer)
+    ppt_buffer.seek(0)
+    return ppt_buffer
+
+
+# --- LOAD DATA SECARA LIVE ---
+@st.cache_data(ttl=5)  # Cek perubahan setiap 5 detik
+def load_live_data():
+    if os.path.exists(DATA_FILE):
+        xls = pd.ExcelFile(DATA_FILE)
+        df_toco = pd.read_excel(xls, sheet_name=0)  # Sesuaikan index/sheet name
+        return df_toco
+    return None
+
+
+# --- SIDEBAR: UPLOAD & LOCKING SYSTEM ---
+st.sidebar.title("🔒 Data Update & Lock")
+uploader_name = st.sidebar.text_input("Nama Pengunggah", value="Tim Operasional")
+uploaded_file = st.sidebar.file_uploader(
+    "Upload Data Excel Terbaru (Weekly)", type=["xlsx", "xls"]
+)
+
+if uploaded_file is not None:
+    if st.sidebar.button("💾 Lock & Update Dashboard"):
+        with open(DATA_FILE, "wb") as f:
+            f.write(uploaded_file.getbuffer())
+
+        # Simpan Metadata Update
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with open(META_FILE, "w") as meta:
+            meta.write(f"{uploader_name}|{now_str}|{uploaded_file.name}")
+
+        st.sidebar.success("Data berhasil di-lock & dashboard ter-update!")
+        st.rerun()
+
+# Menampilkan Status Terakhir Update
+if os.path.exists(META_FILE):
+    with open(META_FILE, "r") as meta:
+        info = meta.read().split("|")
+        st.sidebar.info(
+            f"**Status Live Lock:**\n\n"
+            f"👤 **Oleh:** {info[0]}\n\n"
+            f"🕒 **Waktu:** {info[1]}\n\n"
+            f"📁 **File:** {info[2]}"
+        )
+else:
+    st.sidebar.warning("Belum ada data mingguan yang di-lock.")
+
+# --- MAIN DASHBOARD BOARD ---
+st.title("📊 Dashboard Monitoring TLP & Impact Service")
+
+data_df = load_live_data()
+
+if data_df is not None:
+    st.success("🟢 Connected to Live Data")
+
+    # Dummy/Sample Dataframe dari Excel jika struktur sheet sesuai
+    df_toco = pd.DataFrame(
+        {
+            "ToCO": ["PTI", "DMT", "TBG", "CMI", "DHOST"],
+            "Total TT Impact Service Released": [1390, 481, 331, 504, 116],
+            "SoW": [21449, 12004, 11358, 8009, 847],
+            "Total Sites Impact Service": [1010, 336, 292, 378, 67],
+        }
+    )
+
+    df_root = pd.DataFrame(
+        {
+            "The Root Cause": [
+                "Access Issue_Limited access",
+                "Access Issue_Lightning strike",
+                "Access Issue_Renewal contract",
+                "Access issue_Compensation",
+                "Access Issue_Other issue",
+            ],
+            "Total": [92, 60, 43, 34, 21],
+        }
+    )
+
+    # --- TAMPILKAN GRAFIK ---
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.subheader("Impact Service Released per ToCO")
+        fig1 = px.pie(
+            df_toco,
+            names="ToCO",
+            values="Total TT Impact Service Released",
+            hole=0.4,
+            color_discrete_sequence=COLOR_PALETTE,
+        )
+        st.plotly_chart(fig1, use_container_width=True)
+
+    with col2:
+        st.subheader("Top 5 Root Cause Issues")
+        fig2 = px.pie(
+            df_root,
+            names="The Root Cause",
+            values="Total",
+            color_discrete_sequence=COLOR_PALETTE,
+        )
+        st.plotly_chart(fig2, use_container_width=True)
+
+    # --- TOMBOL EXPORT TO PPTX ---
+    st.markdown("---")
+    st.subheader("📥 Export Presentasi PowerPoint")
+
+    # Ambil info meta untuk slide cover
+    last_user = "Tim"
+    last_time = datetime.now().strftime("%Y-%m-%d")
+    if os.path.exists(META_FILE):
+        with open(META_FILE, "r") as meta:
+            m = meta.read().split("|")
+            last_user, last_time = m[0], m[1]
+
+    ppt_file = create_powerpoint_presentation(
+        df_toco, df_root, df_toco, last_user, last_time
+    )
+
+    st.download_button(
+        label="📊 Download Presentation (.pptx)",
+        data=ppt_file,
+        file_name=f"TLP_Impact_Service_Report_{datetime.now().strftime('%Y%m%d')}.pptx",
+        mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    )
+
+else:
+    st.warning(
+        "Silakan unggah file Excel pertama Anda melalui menu sidebar di sebelah kiri untuk menampilkan grafik."
+    )
