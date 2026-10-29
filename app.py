@@ -3,31 +3,34 @@
 Membaca file .xlsb (sheet `List Access Issue`, `List Stolen`, `TT CME`) dengan pyxlsb.
 Tata letak: header + tombol aksi, bar filter horizontal, 6 kartu KPI, tab navigasi,
 kartu Executive Insight, lalu grafik dalam kartu.
-
-Grafik summary A–E per bulan mengikuti pivot di sheet Summary:
-  A = akumulasi TT open bulan sebelumnya      B = TT baru per bulan
-  C = A + B (akumulasi TT open per bulan)     D = TT close per bulan (C − E)
-  E = sisa TT yang masih open s/d bulan tsb   Progress = D / C
-
-Jalankan:  streamlit run app.py
 """
 from __future__ import annotations
 
 import html
 import io
+import os
 import re
 from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
+import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+from pptx import Presentation
+from pptx.util import Inches, Pt
 from pyxlsb import open_workbook
 
 APP_DIR = Path(__file__).resolve().parent
 ALL = "Semua"
 
-# Kategori dari teks bebas (Stolen: Material Stolen, CME: Description) — aturan kata kunci, urutan = prioritas.
+# Folder untuk shared live data & locking
+DATA_DIR = APP_DIR / "shared_data"
+DATA_FILE = DATA_DIR / "latest_tlp_data.xlsb"
+META_FILE = DATA_DIR / "upload_log.json"
+DATA_DIR.mkdir(exist_ok=True)
+
+# Kategori dari teks bebas
 STOLEN_RULES = [
     ("No stolen / investigasi", r"no stolen|not stolen|tidak ada (?:yang )?hilang|investigat"),
     ("Battery", r"batt|batre|baterai|bater|vrla|accu|aki\b"),
@@ -67,9 +70,10 @@ CATEGORIES = {
 }
 REGION_COL = "New Region"
 
-# Palet untuk latar gelap.
+# Palet untuk latar gelap & Indosat Theme
 BLUE, CYAN, PINK, YELLOW, PURPLE, TEAL, GREEN, RED, ORANGE = (
     "#3b9cff", "#22d3ee", "#ff5c8a", "#fbbf24", "#a78bfa", "#2dd4bf", "#10d39a", "#ff4d6d", "#ff9f43")
+COLOR_PALETTE = ["#E20074", "#FFD100", "#ED1C24", "#00A3AD", "#58595B", "#3b9cff"]
 TEXT, TEXT_2, MUTED = "#e6edf8", "#c3cee6", "#8fa3c8"
 GRID = "rgba(148,170,220,0.14)"
 FONT = 'Inter, "Segoe UI", system-ui, sans-serif'
@@ -81,6 +85,7 @@ SERIES = {
     "E": ("E: Sisa TT masih open [C−D]", RED),
 }
 
+# HANYA SATU KALI PEMANGGILAN SET_PAGE_CONFIG
 st.set_page_config(page_title="TLP Escalation Dashboard", page_icon="📊", layout="wide",
                    initial_sidebar_state="collapsed")
 
@@ -90,8 +95,6 @@ st.markdown(f"""
                        linear-gradient(160deg, #081226 0%, #0c1c42 45%, #10285c 100%); background-attachment: fixed;}}
   [data-testid="stHeader"] {{background: transparent;}}
   .block-container {{padding-top: 1.2rem; padding-bottom: 2rem; max-width: 1600px;}}
-
-  /* Header */
   .hdr {{display:flex; align-items:center; gap:14px;}}
   .hdr .logo {{width:46px; height:46px; border-radius:12px; display:flex; align-items:center; justify-content:center;
               background:linear-gradient(135deg,#ff9f43,#ff6b2c); color:#fff; font-weight:800; font-size:.8rem;
@@ -101,16 +104,12 @@ st.markdown(f"""
               font-weight:600; color:#9ff3ff; background:rgba(34,211,238,.12); border:1px solid rgba(34,211,238,.45);
               vertical-align:middle;}}
   .hdr .sub {{color:{MUTED}; font-size:.78rem; margin-top:2px;}}
-
-  /* Bar filter */
   .st-key-filterbar {{background:rgba(14,30,68,.78); border:1px solid rgba(96,140,230,.28) !important;
                       border-radius:16px; padding:10px 16px 4px 16px; box-shadow:0 8px 24px rgba(0,0,0,.25);}}
   [data-testid="stWidgetLabel"] p {{text-transform:uppercase; font-size:.68rem !important; font-weight:700;
                                    letter-spacing:.06em; color:{MUTED} !important;}}
   [data-baseweb="select"] > div {{background:rgba(8,20,48,.9) !important;
                                    border-color:rgba(96,140,230,.35) !important;}}
-                                   
-  /* Kotak input Pencarian (Site / Issue) diubah jadi Putih */
   .st-key-filterbar [data-baseweb="input"] input, 
   .stTextInput input {{
       background-color: #ffffff !important;
@@ -118,16 +117,7 @@ st.markdown(f"""
       -webkit-text-fill-color: #000000 !important;
       border-color: rgba(96,140,230,.35) !important;
   }}
-  .stTextInput input::placeholder {{
-      color: #666666 !important;
-      -webkit-text-fill-color: #666666 !important;
-  }}
-
-  .st-key-filterbar [data-baseweb="select"] div, .st-key-filterbar input {{font-size:.8rem !important;}}
-  .st-key-filterbar [data-baseweb="select"] > div {{padding-left:2px;}}
-  .st-key-filterbar [data-testid="stColumn"] {{min-width:0;}}
-
-  /* Kartu KPI */
+  .stTextInput input::placeholder {{color: #666666 !important; -webkit-text-fill-color: #666666 !important;}}
   .kpis {{display:grid; grid-template-columns:repeat(6, minmax(0,1fr)); gap:14px; margin:14px 0 6px;}}
   .kpi {{background:rgba(14,30,68,.82); border:1px solid rgba(96,140,230,.22); border-top:3px solid var(--c);
          border-radius:14px; padding:14px 16px 12px; min-height:118px; box-shadow:0 8px 22px rgba(0,0,0,.25);}}
@@ -136,27 +126,18 @@ st.markdown(f"""
               white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}}
   .kpi .val.txt {{font-size:1.25rem; margin-top:10px;}}
   .kpi .sub {{font-size:.74rem; color:{MUTED}; margin-top:4px;}}
-
-  /* Tab navigasi berbentuk pill */
   [role="tablist"] {{gap:8px; flex-wrap:wrap; border-bottom:1px solid rgba(96,140,230,.2); padding-bottom:10px;}}
   [data-testid="stTab"] {{background:rgba(14,30,68,.6); border:1px solid rgba(96,140,230,.2); border-radius:10px;
                          padding:6px 14px !important; height:auto; transition:background .15s;}}
   [data-testid="stTab"] p {{font-size:.86rem; font-weight:600; color:{TEXT_2};}}
-  [data-testid="stTab"]:hover {{background:rgba(59,156,255,.16);}}
   [data-testid="stTab"][aria-selected="true"] {{background:linear-gradient(135deg,#2f7df6,#3b9cff);
                                                border-color:#3b9cff; box-shadow:0 4px 14px rgba(59,156,255,.35);}}
   [data-testid="stTab"][aria-selected="true"] p {{color:#fff;}}
-  [role="tablist"] > :not([role="tab"]), [data-baseweb="tab-highlight"], [data-baseweb="tab-border"] {{display:none;}}
-
-  /* Kartu Executive Insight */
   .insights {{display:grid; grid-template-columns:repeat(4, minmax(0,1fr)); gap:14px; margin:6px 0 14px;}}
   .ins {{background:rgba(14,30,68,.82); border:1px solid rgba(96,140,230,.22); border-left:4px solid var(--c);
          border-radius:14px; padding:14px 16px; box-shadow:0 8px 22px rgba(0,0,0,.25);}}
   .ins h4 {{margin:0 0 6px; font-size:.92rem; color:{TEXT}; font-weight:700;}}
   .ins p {{margin:0; font-size:.83rem; line-height:1.5; color:{TEXT_2};}}
-  .ins b {{color:#fff;}}
-
-  /* Kartu grafik */
   [class*="st-key-card_"] {{background:rgba(14,30,68,.82); border:1px solid rgba(96,140,230,.22) !important;
                             border-radius:14px; padding:12px 14px 6px; box-shadow:0 8px 22px rgba(0,0,0,.25);}}
   .ctitle {{font-size:.95rem; font-weight:700; color:{TEXT}; margin:2px 0 4px;}}
@@ -166,11 +147,7 @@ st.markdown(f"""
 </style>
 """, unsafe_allow_html=True)
 
-
-# ---------- membaca .xlsb dengan pyxlsb ----------
-
-MAX_EMPTY_RUN = 500  # berhenti setelah 500 baris kosong berturut-turut
-
+MAX_EMPTY_RUN = 500
 
 def _clean_name(v, i: int, seen: dict) -> str:
     name = " ".join(str(v).split()) if v not in (None, "") else f"Kolom_{i + 1}"
@@ -180,7 +157,6 @@ def _clean_name(v, i: int, seen: dict) -> str:
     else:
         seen[name] = 0
     return name
-
 
 def read_sheet(wb, sheet: str) -> pd.DataFrame:
     rows, empty_run = [], 0
@@ -202,15 +178,11 @@ def read_sheet(wb, sheet: str) -> pd.DataFrame:
     body = [(r + [None] * width)[:width] for r in rows[1:]]
     return pd.DataFrame(body, columns=header).dropna(how="all")
 
-
 @st.cache_data(show_spinner="Membaca file .xlsb (pyxlsb)…", max_entries=4)
 def load_all(key: str, _source: str | bytes) -> dict[str, pd.DataFrame]:
     src = io.BytesIO(_source) if isinstance(_source, bytes) else _source
     with open_workbook(src) as wb:
         return {k: read_sheet(wb, cfg["sheet"]) for k, cfg in CATEGORIES.items() if cfg["sheet"] in wb.sheets}
-
-
-# ---------- persiapan data ----------
 
 def to_period(s: pd.Series) -> pd.Series:
     text = s.astype("string").str.strip()
@@ -221,7 +193,6 @@ def to_period(s: pd.Series) -> pd.Series:
     out = out.fillna(pd.to_datetime(text.where(out.isna()), errors="coerce"))
     return out.dt.to_period("M")
 
-
 def classify(text: pd.Series, rules: list[tuple[str, str]]) -> pd.Series:
     low = text.astype("string").str.lower().fillna("")
     out = pd.Series("Lainnya", index=text.index, dtype="string")
@@ -229,12 +200,10 @@ def classify(text: pd.Series, rules: list[tuple[str, str]]) -> pd.Series:
         out = out.mask(low.str.contains(pattern, regex=True), label)
     return out
 
-
 def _col(df: pd.DataFrame, name: str | None, default="(Kosong)") -> pd.Series:
     if name and name in df.columns:
         return df[name].astype("string").str.strip().replace("", pd.NA).fillna(default)
     return pd.Series(default, index=df.index, dtype="string")
-
 
 @st.cache_data(show_spinner=False, max_entries=8)
 def prepare(key: str, _df: pd.DataFrame, cat: str) -> pd.DataFrame:
@@ -261,9 +230,6 @@ def prepare(key: str, _df: pd.DataFrame, cat: str) -> pd.DataFrame:
                      .agg(" ".join, axis=1).str.lower()) if any(c in df.columns for c in cfg["site"]) else ""
     return df
 
-
-# ---------- perhitungan ----------
-
 def backlog_summary(df: pd.DataFrame, months: list) -> pd.DataFrame:
     idx = pd.PeriodIndex(months, freq="M")
     new = df.groupby("_period").size().reindex(idx, fill_value=0)
@@ -278,24 +244,17 @@ def backlog_summary(df: pd.DataFrame, months: list) -> pd.DataFrame:
     out.index.name = "Bulan"
     return out
 
-
 def fmt(v) -> str:
     return f"{v:,.0f}".replace(",", ".")
-
 
 def pct(v, digits: int = 1) -> str:
     return "-" if pd.isna(v) else f"{v:.{digits}f}%".replace(".", ",")
 
-
 def days(v) -> str:
     return "-" if pd.isna(v) else f"{v:.2f}".replace(".", ",")
 
-
 def esc(s) -> str:
     return html.escape(str(s))
-
-
-# ---------- gaya grafik gelap ----------
 
 def dark(fig: go.Figure, height: int, legend_top: bool = True) -> go.Figure:
     fig.update_layout(
@@ -311,7 +270,6 @@ def dark(fig: go.Figure, height: int, legend_top: bool = True) -> go.Figure:
     fig.update_yaxes(gridcolor=GRID, linecolor="rgba(0,0,0,0)", zeroline=False, tickfont=dict(color=MUTED))
     return fig
 
-
 def wrap(label, width: int = 14) -> str:
     words, lines, cur = str(label).split(), [], ""
     for w in words:
@@ -323,10 +281,8 @@ def wrap(label, width: int = 14) -> str:
     lines.append(cur)
     return "<br>".join(lines[:3]) + ("…" if len(lines) > 3 else "")
 
-
 def bar_text(values, fmt_fn=fmt):
     return [fmt_fn(v) if pd.notna(v) else "" for v in values]
-
 
 def summary_chart(t: pd.DataFrame) -> go.Figure:
     x, n = t.index.tolist(), len(t)
@@ -358,7 +314,6 @@ def summary_chart(t: pd.DataFrame) -> go.Figure:
         xaxis=dict(tickangle=-30 if n > 8 else 0, showgrid=False))
     return fig
 
-
 def progress_chart(t: pd.DataFrame) -> go.Figure:
     fig = go.Figure()
     for col, color, pos in [("Progress (%)", GREEN, "inside"), ("Remaining (%)", RED, "outside")]:
@@ -371,7 +326,6 @@ def progress_chart(t: pd.DataFrame) -> go.Figure:
                       yaxis=dict(range=[0, 112], ticksuffix="%"), xaxis=dict(tickangle=-30, showgrid=False))
     return fig
 
-
 def open_close_region(d: pd.DataFrame) -> go.Figure:
     ct = pd.crosstab(d["_region"], d["_status"]).reindex(columns=["Closed", "Open"], fill_value=0)
     ct = ct.loc[ct.sum(axis=1).sort_values(ascending=False).index]
@@ -383,7 +337,6 @@ def open_close_region(d: pd.DataFrame) -> go.Figure:
     dark(fig, 360)
     fig.update_layout(barmode="group", yaxis=dict(range=[0, (ct.to_numpy().max() or 1) * 1.18]))
     return fig
-
 
 def mttr_by(d: pd.DataFrame, col: str, top: int = 12, height: int = 360) -> go.Figure:
     closed = d[d["_status"].eq("Closed")]
@@ -405,7 +358,6 @@ def mttr_by(d: pd.DataFrame, col: str, top: int = 12, height: int = 360) -> go.F
                       xaxis=dict(tickangle=-30 if len(g) > 8 else 0, tickfont=dict(size=10)))
     return fig
 
-
 def ranked(d: pd.DataFrame, col: str, top: int = 10, color: str = TEAL, height: int = 360) -> go.Figure:
     vc = d[col].value_counts().head(top)[::-1]
     share = vc / max(len(d), 1) * 100
@@ -419,7 +371,6 @@ def ranked(d: pd.DataFrame, col: str, top: int = 10, color: str = TEAL, height: 
                       xaxis=dict(range=[0, (vc.max() if len(vc) else 1) * 1.3], showgrid=True),
                       yaxis=dict(automargin=True))
     return fig
-
 
 def pareto(d: pd.DataFrame, col: str, top: int = 15) -> go.Figure:
     vc = d[col].value_counts()
@@ -442,7 +393,6 @@ def pareto(d: pd.DataFrame, col: str, top: int = 15) -> go.Figure:
                       xaxis=dict(tickangle=-30 if len(vc) > 8 else 0, tickfont=dict(size=10)))
     return fig
 
-
 def monthly_status(d: pd.DataFrame) -> go.Figure:
     ct = pd.crosstab(d["_period"], d["_status"]).reindex(columns=["Closed", "Open"], fill_value=0).sort_index()
     x = [p.strftime("%b_%Y") for p in ct.index]
@@ -461,116 +411,168 @@ def monthly_status(d: pd.DataFrame) -> go.Figure:
                       xaxis=dict(tickangle=-30 if len(x) > 8 else 0, showgrid=False))
     return fig
 
-
 def chart_card(key: str, badge: str, color: str, title: str, fig: go.Figure) -> None:
     with st.container(key=f"card_{key}"):
         st.markdown(f"<div class='ctitle'><span class='badge' style='--c:{color}'>{esc(badge)}</span>"
                     f"{esc(title)}</div>", unsafe_allow_html=True)
-        st.plotly_chart(fig, width="stretch", config={"displaylogo": False, "displayModeBar": False},
+        st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False, "displayModeBar": False},
                         key=f"fig_{key}")
 
+# --- FUNGSI GENERATE PPTX ---
+def generate_powerpoint(d_df, cat_name, uploader_info, last_updated):
+    prs = Presentation()
+    prs.slide_width = Inches(13.33)
+    prs.slide_height = Inches(7.5)
+    blank_layout = prs.slide_layouts[6]
 
-# ---------- sumber data ----------
+    # Slide 1: Cover
+    slide1 = prs.slides.add_slide(blank_layout)
+    tb = slide1.shapes.add_textbox(Inches(1), Inches(2.5), Inches(11.33), Inches(2))
+    tf = tb.text_frame
+    p1 = tf.paragraphs[0]
+    p1.text = f"Laporan Monitoring TLP — {cat_name}"
+    p1.font.size = Pt(32)
+    p1.font.bold = True
+    p2 = tf.add_paragraph()
+    p2.text = f"Terakhir Diperbarui: {last_updated} oleh {uploader_info}"
+    p2.font.size = Pt(16)
 
+    # Helper tambah slide grafik
+    def add_slide_fig(fig, title_text):
+        slide = prs.slides.add_slide(blank_layout)
+        t_box = slide.shapes.add_textbox(Inches(0.8), Inches(0.5), Inches(11.5), Inches(1))
+        p = t_box.text_frame.paragraphs[0]
+        p.text = title_text
+        p.font.size = Pt(22)
+        p.font.bold = True
+        
+        img_bytes = fig.to_image(format="png", width=1000, height=500)
+        slide.shapes.add_picture(io.BytesIO(img_bytes), Inches(1.5), Inches(1.5), width=Inches(10.33), height=Inches(5.2))
+
+    # Tambahkan beberapa chart utama ke PPT
+    fig_reg = open_close_region(d_df)
+    add_slide_fig(fig_reg, "Open vs Close Ticket per Region")
+
+    fig_mttr = mttr_by(d_df, "_tlp", 10, 360)
+    add_slide_fig(fig_mttr, "Average MTTR per TLP")
+
+    buffer = io.BytesIO()
+    prs.save(buffer)
+    buffer.seek(0)
+    return buffer
+
+# --- MANAJEMEN SUMBER DATA & LIVE LOCK ---
 files = sorted([p for p in APP_DIR.glob("*.xlsb") if not p.name.startswith("~$")],
                key=lambda p: p.stat().st_mtime, reverse=True)
-FILTER_KEYS = ("f_year", "f_region", "f_tlp", "f_cause", "f_status", "f_month", "f_sev", "f_backlog", "f_q")
 
 head_l, head_r = st.columns([1.15, 1], vertical_alignment="center")
 with head_r:
     b1, b2, b3, b4 = st.columns([1.55, 1.05, 1, 1])
-    with b1.popover("📂 Update dari File Excel", width="stretch"):
-        upload = st.file_uploader("Unggah file .xlsb", type=["xlsb"], key="upload")
-        file_pick = None
-        if files:
-            labels = {f"{p.name} · {datetime.fromtimestamp(p.stat().st_mtime):%d-%m-%Y %H:%M}": p for p in files}
-            file_pick = labels[st.selectbox("Atau pilih file di folder aplikasi", list(labels))]
-        if st.button("🔄 Muat ulang data", width="stretch"):
+    with b1.popover("📂 Update & Lock Data", use_container_width=True):
+        uploader_name = st.text_input("Nama Pengunggah", value="Tim Operasional")
+        upload = st.file_uploader("Unggah file .xlsb baru", type=["xlsb"], key="upload_xlsb")
+        if upload is not None:
+            if st.button("💾 Simpan & Lock Data Mingguan", use_container_width=True):
+                with open(DATA_FILE, "wb") as f:
+                    f.write(upload.getbuffer())
+                now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                META_FILE.write_text(f"{uploader_name}|{now_str}|{upload.name}", encoding="utf-8")
+                st.success("Data berhasil di-lock dan diperbarui!")
+                st.rerun()
+        
+        if DATA_FILE.exists():
+            st.info(f"File aktif saat ini tersimpan di server.")
+        if st.button("🔄 Muat Ulang", use_container_width=True):
             st.cache_data.clear()
             st.rerun()
-    with b2.popover("📘 Cara Update", width="stretch"):
-        st.markdown(
-            f"1. Simpan file `.xlsb` terbaru ke folder **{APP_DIR}** (atau unggah lewat *Update dari File Excel*).\n"
-            "2. Pastikan sheet **List Access Issue**, **List Stolen**, dan **TT CME** ada, header di baris pertama.\n"
-            "3. Klik **Muat ulang data**. File terbaru otomatis dipilih.\n\n"
-            "Grafik A–E: TT berstatus *Cancel* tidak dihitung (sama dengan pivot Summary).")
-    export_slot = b3.empty()
-    if b4.button("↻ Reset Filter", width="stretch"):
-        for k in [k for k in st.session_state if str(k).startswith(FILTER_KEYS) or k == "ae_range"]:
-            st.session_state.pop(k, None)
-        st.rerun()
 
-if upload is not None:
-    source, source_name, cache_key = upload.getvalue(), upload.name, f"upload:{upload.name}:{upload.size}"
-    mtime = datetime.now()
-elif file_pick is not None:
-    source, source_name, cache_key = str(file_pick), file_pick.name, f"{file_pick}:{file_pick.stat().st_mtime}"
-    mtime = datetime.fromtimestamp(file_pick.stat().st_mtime)
-else:
-    source = None
+    with b2.popover("📘 Cara Update", use_container_width=True):
+        st.markdown(
+            "1. Unggah file `.xlsb` terbaru melalui tombol *Update & Lock Data*.\n"
+            "2. Sistem akan mengunci data untuk update mingguan.\n"
+            "3. Grafik otomatis menyesuaikan.")
+    
+    export_slot = b3.empty()
+    
+    with b4:
+        if st.button("↻ Reset", use_container_width=True):
+            for k in list(st.session_state.keys()):
+                if any(str(k).startswith(x) for x in ["f_year", "f_region", "f_tlp", "f_cause", "f_status", "f_month", "f_sev", "f_backlog", "f_q"]):
+                    st.session_state.pop(k, None)
+            st.rerun()
+
+# Tentukan sumber data aktif (prioritas dari file live lock, lalu file default folder)
+active_source = None
+source_name = ""
+mtime = datetime.now()
+
+if DATA_FILE.exists():
+    active_source = str(DATA_FILE)
+    source_name = "latest_tlp_data.xlsb (Locked)"
+    mtime = datetime.fromtimestamp(DATA_FILE.stat().st_mtime)
+elif files:
+    active_source = str(files[0])
+    source_name = files[0].name
+    mtime = datetime.fromtimestamp(files[0].stat().st_mtime)
 
 with head_l:
-    pill = f"<span class='pill'>{esc(source_name)}</span>" if source else ""
-    sub = (f"Sumber: <b>{esc(source_name)}</b> • Diperbarui: {mtime:%Y-%m-%d %H:%M:%S} • Dibaca dengan pyxlsb"
-           if source else "Belum ada file data")
+    pill = f"<span class='pill'>{esc(source_name)}</span>" if active_source else ""
+    meta_info = ""
+    if META_FILE.exists():
+        parts = META_FILE.read_text(encoding="utf-8").split("|")
+        if len(parts) >= 2:
+            meta_info = f" • Di-lock oleh: <b>{parts[0]}</b> ({parts[1]})"
+    sub = f"Sumber: <b>{esc(source_name)}</b>{meta_info} • Dibaca dengan pyxlsb" if active_source else "Belum ada file data"
     st.markdown(f"<div class='hdr'><div class='logo'>TLP</div><div><h1>TLP Escalation Dashboard{pill}</h1>"
                 f"<div class='sub'>{sub}</div></div></div>", unsafe_allow_html=True)
 
-if source is None:
-    st.info(f"Belum ada file .xlsb. Letakkan file di folder **{APP_DIR}** atau klik **Update dari File Excel**.")
+if not active_source:
+    st.info(f"Belum ada file `.xlsb`. Silakan unggah melalui menu **Update & Lock Data** di pojok kanan atas.")
     st.stop()
 
 try:
-    sheets = load_all(cache_key, source)
+    sheets = load_all(active_source, active_source)
 except Exception as exc:
-    st.error(f"Gagal membaca **{source_name}**: {exc}")
+    st.error(f"Gagal membaca file data: {exc}")
     st.stop()
 if not sheets:
-    st.error("Sheet List Access Issue / List Stolen / TT CME tidak ditemukan di file ini.")
+    st.error("Sheet yang diperlukan (List Access Issue / List Stolen / TT CME) tidak ditemukan di file ini.")
     st.stop()
 
-
-# ---------- bar filter horizontal (Menggunakan Multiselect / Ceklis) ----------
-
-def opts(series: pd.Series, label: str, sort_by_count: bool = True) -> list[str]:
-    vals = series.value_counts().index.tolist() if sort_by_count else sorted(series.dropna().unique())
-    return [str(v) for v in vals]
-
+# --- BAR FILTER HORIZONTAL ---
+FILTER_KEYS = ("f_year", "f_region", "f_tlp", "f_cause", "f_status", "f_month", "f_sev", "f_backlog", "f_q")
 
 with st.container(key="filterbar"):
     r1 = st.columns([1.15, 1.05, 1.15, 1.15, 1.25, 1.3, 1.1, 1.1, 1.35])
     cat = r1[0].selectbox("Kategori", [c for c in CATEGORIES if c in sheets],
                           format_func=lambda c: f"{CATEGORIES[c]['icon']} {c}", key="f_cat")
     cfg = CATEGORIES[cat]
-    base = prepare(f"{cache_key}:{cat}", sheets[cat], cat)
+    base = prepare(f"{active_source}:{cat}", sheets[cat], cat)
     
     if "backlog" in cfg:
-        bl_opts = opts(base["_backlog"], "Backlog")
+        bl_opts = sorted(base["_backlog"].dropna().unique())
         f_backlog = r1[7].multiselect("Backlog", bl_opts, default=[], key=f"f_backlog_{cat}")
     else:
         f_backlog = []
 
-    f_year = r1[1].multiselect("Years", sorted(opts(base["_year"], "Tahun"), reverse=True), key=f"f_year_{cat}")
-    f_region = r1[2].multiselect("Region", opts(base["_region"], "Region"), key=f"f_region_{cat}")
-    f_tlp = r1[3].multiselect("TLP (ToCo)", opts(base["_tlp"], "TLP"), key=f"f_tlp_{cat}")
-    f_cause = r1[4].multiselect(cfg["cause_label"], opts(base["_cause"], "Kategori"), key=f"f_cause_{cat}")
+    f_year = r1[1].multiselect("Years", sorted(base["_year"].dropna().unique(), reverse=True), key=f"f_year_{cat}")
+    f_region = r1[2].multiselect("Region", sorted(base["_region"].dropna().unique()), key=f"f_region_{cat}")
+    f_tlp = r1[3].multiselect("TLP (ToCo)", sorted(base["_tlp"].dropna().unique()), key=f"f_tlp_{cat}")
+    f_cause = r1[4].multiselect(cfg["cause_label"], sorted(base["_cause"].dropna().unique()), key=f"f_cause_{cat}")
     
     status_opts = ["Open", "Closed", "Cancel"]
-    f_status = r1[5].multiselect("Status", status_opts, key=f"f_status_{cat}",
-                               help="Pilih status yang ingin ditampilkan.")
+    f_status = r1[5].multiselect("Status", status_opts, key=f"f_status_{cat}")
                                
     months_all = sorted(base["_period"].unique())
-    f_month = r1[6].multiselect("Bulan (Open)", [p.strftime("%b_%Y") for p in months_all[::-1]],
-                              key=f"f_month_{cat}")
+    f_month = r1[6].multiselect("Bulan (Open)", [p.strftime("%b_%Y") for p in months_all[::-1]], key=f"f_month_{cat}")
                               
     if not cfg.get("backlog"):
-        f_sev = r1[7].multiselect("Severity", opts(base["_sev"], "Severity"), key=f"f_sev_{cat}")
+        f_sev = r1[7].multiselect("Severity", sorted(base["_sev"].dropna().unique()), key=f"f_sev_{cat}")
     else:
         f_sev = []
         
-    f_q = r1[8].text_input("Cari Site / Issue", placeholder="Ketik Site ID, nama, TT, deskripsi…", key=f"f_q_{cat}")
+    f_q = r1[8].text_input("Cari Site / Issue", placeholder="Ketik Site ID, nama, TT...", key=f"f_q_{cat}")
 
-# Logika penyaringan data (jika multiselect kosong, maka semua data ditampilkan)
 def apply_multiselect(data, col, selected):
     if selected:
         return data[data[col].isin(selected)]
@@ -588,18 +590,36 @@ d = apply_multiselect(d, "_month", f_month)
 if f_q.strip():
     d = d[d["_search"].str.contains(re.escape(f_q.strip().lower()), regex=True, na=False)]
 
-dim = d[d["_status"] != "Cancel"]  # dasar grafik A–E (Cancel tidak dihitung)
+dim = d[d["_status"] != "Cancel"]
 
 if f_status:
     d = d[d["_status"].isin(f_status)]
 
 export_cols = [c for c in d.columns if not c.startswith("_")]
-export_slot.download_button("⬇️ Export CSV", d[export_cols].to_csv(index=False).encode("utf-8-sig"),
-                            file_name=f"TLP_{cat.replace(' ', '_')}_{datetime.now():%Y%m%d_%H%M}.csv",
-                            mime="text/csv", width="stretch")
 
-# ---------- kartu KPI ----------
+# Tombol Export CSV & PPT di slot
+with export_slot:
+    st.download_button("⬇️ Export CSV", d[export_cols].to_csv(index=False).encode("utf-8-sig"),
+                       file_name=f"TLP_{cat.replace(' ', '_')}_{datetime.now():%Y%m%d}.csv",
+                       mime="text/csv", use_container_width=True)
 
+# Tombol Download PPT di Sidebar atau bawah
+st.sidebar.markdown("---")
+st.sidebar.subheader("📥 Export Presentasi")
+if st.sidebar.button("📊 Download Report (.pptx)", use_container_width=True):
+    last_user = "Tim"
+    last_time = datetime.now().strftime("%Y-%m-%d")
+    if META_FILE.exists():
+        m = META_FILE.read_text(encoding="utf-8").split("|")
+        if len(m) >= 2:
+            last_user, last_time = m[0], m[1]
+    ppt_stream = generate_powerpoint(d, cat, last_user, last_time)
+    st.sidebar.download_button("Klik untuk Unduh PPTX", data=ppt_stream,
+                               file_name=f"TLP_Report_{cat}_{datetime.now():%Y%m%d}.pptx",
+                               mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                               use_container_width=True)
+
+# --- KARTU KPI ---
 total = len(d)
 closed = d[d["_status"] == "Closed"]
 open_ = d[d["_status"] == "Open"]
@@ -608,77 +628,32 @@ mttr = closed["_aging"].mean()
 tlp_vc = d["_tlp"].value_counts()
 cause_vc = d["_cause"].value_counts()
 
-
 def kpi(label, value, sub, color, text_value=False):
     cls = "val txt" if text_value else "val"
     return (f"<div class='kpi' style='--c:{color}'><div class='lbl'>{esc(label)}</div>"
             f"<div class='{cls}' title='{esc(value)}'>{esc(value)}</div><div class='sub'>{sub}</div></div>")
 
-
 top_tlp = (tlp_vc.index[0], tlp_vc.iloc[0]) if len(tlp_vc) else ("-", 0)
 top_cause = (cause_vc.index[0], cause_vc.iloc[0]) if len(cause_vc) else ("-", 0)
+
 st.markdown("<div class='kpis'>" + "".join([
     kpi(f"Total TT {cat}", fmt(total), f"Dari {fmt(len(base))} total record", BLUE),
     kpi("Ticket Closed", fmt(len(closed)), f"Close Rate: {pct(close_rate, 2)}", CYAN),
     kpi("Ticket Masih Open", fmt(len(open_)), f"Avg Aging: {days(open_['_aging'].mean())} hari", PINK),
     kpi("Overall MTTR", f"{days(mttr)} d", f"Dari {fmt(len(closed))} tiket CLOSE", YELLOW),
-    kpi("Top TLP Volume", top_tlp[0], f"{fmt(top_tlp[1])} TT ({pct(top_tlp[1] / max(total, 1) * 100)})",
-        PURPLE, True),
-    kpi(f"Top {cfg['cause_label']}", top_cause[0],
-        f"{fmt(top_cause[1])} TT ({pct(top_cause[1] / max(total, 1) * 100)})", TEAL, True),
+    kpi("Top TLP Volume", top_tlp[0], f"{fmt(top_tlp[1])} TT ({pct(top_tlp[1] / max(total, 1) * 100)})", PURPLE, True),
+    kpi(f"Top {cfg['cause_label']}", top_cause[0], f"{fmt(top_cause[1])} TT ({pct(top_cause[1] / max(total, 1) * 100)})", TEAL, True),
 ]) + "</div>", unsafe_allow_html=True)
 
 if d.empty:
-    st.warning("Tidak ada data untuk kombinasi filter ini. Klik **Reset Filter** untuk mengembalikan.")
+    st.warning("Tidak ada data untuk kombinasi filter ini. Klik **Reset** untuk mengembalikan filter.")
     st.stop()
 
-
-# ---------- executive insight ----------
-
-def insights(d: pd.DataFrame) -> list[tuple[str, str, str]]:
-    n = max(len(d), 1)
-    reg = d["_region"].value_counts()
-    r_top = reg.head(2)
-    open_tlp = d[d["_status"] == "Open"]["_tlp"].value_counts().head(2)
-    open_txt = (" (terbanyak di " + " & ".join(f"<b>{esc(k)}</b> {fmt(v)} TT" for k, v in open_tlp.items()) + ")"
-                if len(open_tlp) else "")
-    p1 = (" & ".join(f"Region <b>{esc(k)} ({fmt(v)} TT)</b>" for k, v in r_top.items())
-          + f" menyumbang <b>{pct(r_top.sum() / n * 100)}</b> dari total tiket {esc(cat)}. "
-          f"Saat ini tersisa <b>{fmt((d['_status'] == 'Open').sum())} tiket OPEN</b>{open_txt}.")
-
-    cl = d[d["_status"] == "Closed"]
-    g = cl.groupby("_tlp")["_aging"].agg(["mean", "size"]).sort_values("size", ascending=False).head(4)
-    avg = cl["_aging"].mean()
-    if len(g):
-        fast = g["mean"].idxmin()
-        slow = g[g["mean"] > avg].sort_values("mean", ascending=False)
-        slow_txt = (", sementara " + ", ".join(f"<b>{esc(k)} ({days(v)}d)</b>" for k, v in slow["mean"].items())
-                    + " berada di atas rata-rata.") if len(slow) else "; semua TLP utama di bawah rata-rata."
-        p2 = (f"Grand average MTTR berada di <b>{days(avg)} hari</b>. Di antara {len(g)} TLP utama, "
-              f"<b>{esc(fast)}</b> mencatat MTTR tercepat (<b>{days(g.loc[fast, 'mean'])} hari</b>){slow_txt}")
-    else:
-        p2 = "Belum ada tiket CLOSE pada filter ini."
-
-    tv = d["_tlp"].value_counts().head(4)
-    p3 = (f"<b>{len(tv)} TLP teratas</b> (" + ", ".join(f"{esc(k)} {fmt(v)}" for k, v in tv.items())
-          + f") mendominasi <b>{pct(tv.sum() / n * 100)}</b> dari seluruh tiket {esc(cat)}.")
-
-    cv = d["_cause"].value_counts().head(3)
-    p4 = (f"{len(cv)} isu teratas — " + ", ".join(f"<b>{esc(k)} ({fmt(v)} TT)</b>" for k, v in cv.items())
-          + f" — menyumbang <b>{pct(cv.sum() / n * 100)}</b> dari seluruh tiket.")
-    return [("📍 Regional & TLP Open/Close", p1, BLUE), ("⏱️ Performa MTTR per TLP", p2, YELLOW),
-            ("🏢 Konsentrasi TLP (Pareto)", p3, CYAN), (f"🔎 {cfg['cause_label']} Dominan", p4, PINK)]
-
-
-# ---------- tab navigasi ----------
-
+# --- TAB NAVIGASI UTAMA ---
 tabs = st.tabs(["📊 Executive Summary", "📈 Trend A–E", "⏱️ MTTR per TLP", "🏢 Jumlah TT per TLP",
                 f"🔎 {cfg['cause_label']}", f"🗂️ Data Explorer ({fmt(len(d))} TT)"])
 
 with tabs[0]:
-    st.markdown("<div class='insights'>" + "".join(
-        f"<div class='ins' style='--c:{c}'><h4>{esc(t)}</h4><p>{body}</p></div>" for t, body, c in insights(d))
-        + "</div>", unsafe_allow_html=True)
     a, b = st.columns(2)
     with a:
         chart_card("oc_region", "PVT-1", BLUE, "Open vs Close Ticket per Region", open_close_region(d))
@@ -700,11 +675,6 @@ with tabs[1]:
         t = backlog_summary(dim[dim["_period"].between(win[0], win[-1])], win)
         chart_card("ae", "A–E", BLUE, f"Trend TT {cat} · {m_from} – {m_to}", summary_chart(t))
         chart_card("progress", "%", GREEN, f"Progress & Remaining TT {cat}", progress_chart(t))
-        with st.expander("Tabel summary A–E"):
-            st.dataframe(t.rename(columns={k: v[0] for k, v in SERIES.items()}), width="stretch",
-                         column_config={"Progress (%)": st.column_config.NumberColumn(format="%.1f%%"),
-                                        "Remaining (%)": st.column_config.NumberColumn(format="%.1f%%")})
-        st.caption("Grafik A–E mengikuti filter di atas kecuali Status & Bulan; TT Cancel tidak dihitung.")
 
 with tabs[2]:
     chart_card("mttr_tlp2", "PVT-2", YELLOW, "Average MTTR (Days) per TLP", mttr_by(d, "_tlp", 15, 400))
@@ -712,15 +682,13 @@ with tabs[2]:
     with a:
         chart_card("mttr_region", "MTTR", ORANGE, "Average MTTR (Days) per Region", mttr_by(d, "_region"))
     with b:
-        chart_card("mttr_cause", "MTTR", PINK, f"Average MTTR (Days) per {cfg['cause_label']}",
-                   mttr_by(d, "_cause"))
+        chart_card("mttr_cause", "MTTR", PINK, f"Average MTTR (Days) per {cfg['cause_label']}", mttr_by(d, "_cause"))
 
 with tabs[3]:
     chart_card("pareto", "PVT-3", PURPLE, "Jumlah TT per TLP (Pareto)", pareto(d, "_tlp"))
     a, b = st.columns(2)
     with a:
-        chart_card("tlp_open", "OPEN", PINK, "TT masih OPEN per TLP",
-                   ranked(d[d["_status"] == "Open"], "_tlp", 10, PINK))
+        chart_card("tlp_open", "OPEN", PINK, "TT masih OPEN per TLP", ranked(d[d["_status"] == "Open"], "_tlp", 10, PINK))
     with b:
         chart_card("tlp_sev", "SEV", CYAN, "Jumlah TT per Severity", ranked(d, "_sev", 8, CYAN, 300))
 
@@ -730,9 +698,6 @@ with tabs[4]:
         chart_card("cause2", "PVT-4", TEAL, f"Top {cfg['cause_label']}", ranked(d, "_cause", 12, TEAL, 420))
     with b:
         chart_card("cause_pareto", "PVT-4", PURPLE, f"Pareto {cfg['cause_label']}", pareto(d, "_cause", 12))
-    if cfg.get("cause_rules"):
-        st.caption(f"{cfg['cause_label']} dikelompokkan otomatis dari kolom **{cfg['cause']}** (teks bebas) "
-                   "berdasarkan kata kunci; yang tidak cocok masuk *Lainnya*.")
 
 with tabs[5]:
     default_cols = [c for c in (cfg["site"] + [REGION_COL, cfg["tlp"], cfg["status"], cfg["month"], cfg["aging"],
@@ -742,229 +707,4 @@ with tabs[5]:
     for c in shown.columns:
         if shown[c].dtype == object:
             shown[c] = shown[c].astype("string")
-    st.dataframe(shown, hide_index=True, width="stretch", height=560)
-
-import io
-import os
-from datetime import datetime
-import pandas as pd
-import plotly.express as px
-import streamlit as st
-from pptx import Presentation
-from pptx.util import Inches, Pt
-
-# --- KONFIGURASI TEMA INDOSAT & FOLDER DATA ---
-DATA_DIR = "shared_data"
-DATA_FILE = os.path.join(DATA_DIR, "latest_tlp_data.xlsx")
-META_FILE = os.path.join(DATA_DIR, "upload_log.json")
-
-os.makedirs(DATA_DIR, exist_ok=True)
-
-COLOR_PALETTE = ["#E20074", "#FFD100", "#ED1C24", "#00A3AD", "#58595B"]
-
-st.set_page_config(
-    page_title="Dashboard Monitoring TLP", layout="wide", page_icon="📊"
-)
-
-# --- SKRIP UNTUK GENERATE POWERPOINT PRESENTATION ---
-def create_powerpoint_presentation(
-    df_toco, df_root, df_impact, uploader_info, last_updated
-):
-    prs = Presentation()
-    # Atur ukuran slide 16:9
-    prs.slide_width = Inches(13.33)
-    prs.slide_height = Inches(7.5)
-    blank_slide_layout = prs.slide_layouts[6]
-
-    # --- SLIDE 1: JUDUL PRESENTASI ---
-    slide1 = prs.slides.add_slide(blank_slide_layout)
-    title_box = slide1.shapes.add_textbox(
-        Inches(1), Inches(2.5), Inches(11.33), Inches(2)
-    )
-    tf1 = title_box.text_frame
-    p1 = tf1.paragraphs[0]
-    p1.text = "Laporan Weekly Monitoring TLP & Impact Service"
-    p1.font.size = Pt(36)
-    p1.font.bold = True
-
-    p2 = tf1.add_paragraph()
-    p2.text = f"Terakhir Diperbarui: {last_updated} oleh {uploader_info}"
-    p2.font.size = Pt(18)
-
-    # --- HELPER FUNGSIONAL UNTUK EXPORT PLOTLY KE PPT ---
-    def add_chart_slide(fig, title_text):
-        slide = prs.slides.add_slide(blank_slide_layout)
-
-        # Judul Slide
-        t_box = slide.shapes.add_textbox(
-            Inches(0.8), Inches(0.5), Inches(11.5), Inches(1)
-        )
-        tf = t_box.text_frame
-        p = tf.paragraphs[0]
-        p.text = title_text
-        p.font.size = Pt(24)
-        p.font.bold = True
-
-        # Render Plotly ke Bytes Image PNG
-        img_bytes = fig.to_image(format="png", width=1000, height=550)
-        img_stream = io.BytesIO(img_bytes)
-
-        slide.shapes.add_picture(
-            img_stream,
-            Inches(1.5),
-            Inches(1.5),
-            width=Inches(10.33),
-            height=Inches(5.5),
-        )
-
-    # Convert Figures ke Slide
-    fig_toco = px.pie(
-        df_toco,
-        names="ToCO",
-        values="Total TT Impact Service Released",
-        title="Impact Service Released per ToCO",
-        color_discrete_sequence=COLOR_PALETTE,
-    )
-    add_chart_slide(fig_toco, "1. Impact Service Released Terbanyak")
-
-    fig_rc = px.pie(
-        df_root,
-        names="The Root Cause",
-        values="Total",
-        title="Top Root Cause Issues",
-        color_discrete_sequence=COLOR_PALETTE,
-    )
-    add_chart_slide(fig_rc, "2. Top Root Causes Analysis")
-
-    # Save to Bytes Buffer
-    ppt_buffer = io.BytesIO()
-    prs.save(ppt_buffer)
-    ppt_buffer.seek(0)
-    return ppt_buffer
-
-
-# --- LOAD DATA SECARA LIVE ---
-@st.cache_data(ttl=5)  # Cek perubahan setiap 5 detik
-def load_live_data():
-    if os.path.exists(DATA_FILE):
-        xls = pd.ExcelFile(DATA_FILE)
-        df_toco = pd.read_excel(xls, sheet_name=0)  # Sesuaikan index/sheet name
-        return df_toco
-    return None
-
-
-# --- SIDEBAR: UPLOAD & LOCKING SYSTEM ---
-st.sidebar.title("🔒 Data Update & Lock")
-uploader_name = st.sidebar.text_input("Nama Pengunggah", value="Tim Operasional")
-uploaded_file = st.sidebar.file_uploader(
-    "Upload Data Excel Terbaru (Weekly)", type=["xlsx", "xls"]
-)
-
-if uploaded_file is not None:
-    if st.sidebar.button("💾 Lock & Update Dashboard"):
-        with open(DATA_FILE, "wb") as f:
-            f.write(uploaded_file.getbuffer())
-
-        # Simpan Metadata Update
-        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        with open(META_FILE, "w") as meta:
-            meta.write(f"{uploader_name}|{now_str}|{uploaded_file.name}")
-
-        st.sidebar.success("Data berhasil di-lock & dashboard ter-update!")
-        st.rerun()
-
-# Menampilkan Status Terakhir Update
-if os.path.exists(META_FILE):
-    with open(META_FILE, "r") as meta:
-        info = meta.read().split("|")
-        st.sidebar.info(
-            f"**Status Live Lock:**\n\n"
-            f"👤 **Oleh:** {info[0]}\n\n"
-            f"🕒 **Waktu:** {info[1]}\n\n"
-            f"📁 **File:** {info[2]}"
-        )
-else:
-    st.sidebar.warning("Belum ada data mingguan yang di-lock.")
-
-# --- MAIN DASHBOARD BOARD ---
-st.title("📊 Dashboard Monitoring TLP & Impact Service")
-
-data_df = load_live_data()
-
-if data_df is not None:
-    st.success("🟢 Connected to Live Data")
-
-    # Dummy/Sample Dataframe dari Excel jika struktur sheet sesuai
-    df_toco = pd.DataFrame(
-        {
-            "ToCO": ["PTI", "DMT", "TBG", "CMI", "DHOST"],
-            "Total TT Impact Service Released": [1390, 481, 331, 504, 116],
-            "SoW": [21449, 12004, 11358, 8009, 847],
-            "Total Sites Impact Service": [1010, 336, 292, 378, 67],
-        }
-    )
-
-    df_root = pd.DataFrame(
-        {
-            "The Root Cause": [
-                "Access Issue_Limited access",
-                "Access Issue_Lightning strike",
-                "Access Issue_Renewal contract",
-                "Access issue_Compensation",
-                "Access Issue_Other issue",
-            ],
-            "Total": [92, 60, 43, 34, 21],
-        }
-    )
-
-    # --- TAMPILKAN GRAFIK ---
-    col1, col2 = st.columns(2)
-
-    with col1:
-        st.subheader("Impact Service Released per ToCO")
-        fig1 = px.pie(
-            df_toco,
-            names="ToCO",
-            values="Total TT Impact Service Released",
-            hole=0.4,
-            color_discrete_sequence=COLOR_PALETTE,
-        )
-        st.plotly_chart(fig1, use_container_width=True)
-
-    with col2:
-        st.subheader("Top 5 Root Cause Issues")
-        fig2 = px.pie(
-            df_root,
-            names="The Root Cause",
-            values="Total",
-            color_discrete_sequence=COLOR_PALETTE,
-        )
-        st.plotly_chart(fig2, use_container_width=True)
-
-    # --- TOMBOL EXPORT TO PPTX ---
-    st.markdown("---")
-    st.subheader("📥 Export Presentasi PowerPoint")
-
-    # Ambil info meta untuk slide cover
-    last_user = "Tim"
-    last_time = datetime.now().strftime("%Y-%m-%d")
-    if os.path.exists(META_FILE):
-        with open(META_FILE, "r") as meta:
-            m = meta.read().split("|")
-            last_user, last_time = m[0], m[1]
-
-    ppt_file = create_powerpoint_presentation(
-        df_toco, df_root, df_toco, last_user, last_time
-    )
-
-    st.download_button(
-        label="📊 Download Presentation (.pptx)",
-        data=ppt_file,
-        file_name=f"TLP_Impact_Service_Report_{datetime.now().strftime('%Y%m%d')}.pptx",
-        mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-    )
-
-else:
-    st.warning(
-        "Silakan unggah file Excel pertama Anda melalui menu sidebar di sebelah kiri untuk menampilkan grafik."
-    )
+    st.dataframe(shown, hide_index=True, use_container_width=True, height=560)
