@@ -2,3 +2,5 @@ streamlit>=1.50
 pandas>=2.2
 plotly>=6.0
 pyxlsb>=1.0
+python-pptx>=1.0
+kaleido>=1.0

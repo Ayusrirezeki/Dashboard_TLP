@@ -1,10 +1,21 @@
-"""TLP Escalation Dashboard — Access Issue, Stolen, dan TT CME (tema gelap).
+"""TLP Escalation Dashboard — Access Issue, Stolen, dan TT CME.
 
-Membaca file .xlsb (sheet `List Access Issue`, `List Stolen`, `TT CME`) dengan pyxlsb.
-Tata letak: header + tombol aksi, bar filter horizontal, 6 kartu KPI, tab navigasi,
-kartu Executive Insight, lalu grafik dalam kartu.
+Fitur:
+  * Membaca file .xlsb (sheet `List Access Issue`, `List Stolen`, `TT CME`) dengan pyxlsb.
+    Tabel SoW (A) per ToCo diambil dari sheet `performance access` / `Performance Stolen`
+    bila ada, dan bisa disunting dari dashboard.
+  * Bar filter horizontal (multiselect), 6 kartu KPI, tab navigasi, Executive Insight.
+  * Grafik Impact Service & SoW: donut impact per ToCo, pie SoW vs sites impact,
+    pie SoW vs sites stolen, dan pie top 5 root cause (header case).
+  * Upload data mingguan bersama: file disimpan ke `shared_data/latest_tlp_data.xlsb`,
+    log pengunggah di `shared_data/upload_log.json`; semua pengguna ter-refresh otomatis.
+  * Export PowerPoint (python-pptx + kaleido) dengan grafik resolusi tinggi.
 
-Grafik summary A–E per bulan mengikuti pivot di sheet Summary:
+Aturan Impact Service (sama dengan rumus COUNTIFS di Excel):
+  Site Status (kolom ke-2) = "Down" dan Case Status ∈ {Open, Closed}.
+  Total TT Impact Service Released = jumlah TT; Total Sites Impact Service (B) = jumlah site unik.
+
+Grafik summary A–E per bulan mengikuti pivot sheet Summary:
   A = akumulasi TT open bulan sebelumnya      B = TT baru per bulan
   C = A + B (akumulasi TT open per bulan)     D = TT close per bulan (C − E)
   E = sisa TT yang masih open s/d bulan tsb   Progress = D / C
@@ -13,21 +24,55 @@ Jalankan:  streamlit run app.py
 """
 from __future__ import annotations
 
-import html
-import io
-import re
-from datetime import datetime
-from pathlib import Path
-
-import pandas as pd
-import plotly.graph_objects as go
 import streamlit as st
-from pyxlsb import open_workbook
+
+# set_page_config harus menjadi perintah Streamlit pertama dan hanya dipanggil sekali.
+st.set_page_config(page_title="TLP Escalation Dashboard", page_icon="📊", layout="wide",
+                   initial_sidebar_state="collapsed")
+
+import html  # noqa: E402
+import io  # noqa: E402
+import json  # noqa: E402
+import os  # noqa: E402
+import re  # noqa: E402
+import time  # noqa: E402
+from datetime import datetime  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+import pandas as pd  # noqa: E402
+import plotly.graph_objects as go  # noqa: E402
+from pyxlsb import open_workbook  # noqa: E402
+
+# =====================================================================================
+# Konstanta
+# =====================================================================================
 
 APP_DIR = Path(__file__).resolve().parent
-ALL = "Semua"
+SHARED_DIR = APP_DIR / "shared_data"
+LATEST_FILE = SHARED_DIR / "latest_tlp_data.xlsb"
+LOG_FILE = SHARED_DIR / "upload_log.json"
+LOCK_FILE = SHARED_DIR / "upload.lock"
+SOW_FILE = SHARED_DIR / "sow_override.json"
+LOCK_TIMEOUT_S = 180       # lock unggahan dianggap basi setelah 3 menit
+REFRESH_EVERY = "15s"      # interval cek data baru untuk auto-refresh semua pengguna
 
-# Kategori dari teks bebas (Stolen: Material Stolen, CME: Description) — aturan kata kunci, urutan = prioritas.
+# Warna khas Indosat di atas latar gelap.
+MAGENTA, YELLOW, RED, TOSCA = "#E20074", "#FFD100", "#ED1C24", "#00A3AD"
+PURPLE, ORANGE, TOSCA_2, PINK_2 = "#9B3D97", "#F7941D", "#4FD1D9", "#FF6FB5"
+PALETTE = [MAGENTA, YELLOW, TOSCA, RED, PURPLE, ORANGE, TOSCA_2, PINK_2]
+BG, CARD = "#0b0d17", "rgba(22,24,42,.86)"
+TEXT, TEXT_2, MUTED = "#f2f3f8", "#cfd2e3", "#9aa0bd"
+GRID = "rgba(190,195,230,0.12)"
+FONT = 'Inter, "Segoe UI", system-ui, sans-serif'
+SERIES = {
+    "A": ("A: Akumulasi TT open bulan sebelumnya", "#8a8fa8"),
+    "B": ("B: TT baru per bulan", MAGENTA),
+    "C": ("C: Akumulasi TT open per bulan", YELLOW),
+    "D": ("D: TT close per bulan", TOSCA),
+    "E": ("E: Sisa TT masih open [C−D]", RED),
+}
+
+# Kategori dari teks bebas (Stolen: Material Stolen, CME: Description) — urutan = prioritas.
 STOLEN_RULES = [
     ("No stolen / investigasi", r"no stolen|not stolen|tidak ada (?:yang )?hilang|investigat"),
     ("Battery", r"batt|batre|baterai|bater|vrla|accu|aki\b"),
@@ -49,102 +94,128 @@ CME_RULES = [
     ("AC / Cooling", r"\bac\b|aircon|cooling|fan\b"),
 ]
 
+# Nama ToCo di tiap sheet berbeda (GROUP1, Toco Group Name, Owner) -> kode singkat seragam.
+TOCO_RULES = [
+    ("PTI", r"\bpti\b|protelindo|profesional telekom"),
+    ("DMT", r"\bdmt\b|mitratel|dayamitra"),
+    ("TBG", r"\btbg\b|tower bersama"),
+    ("CMI", r"\bcmi\b|epid|menara assetco"),
+    ("DHOST", r"dhost"),
+    ("BALI TOWER", r"bali tower"),
+    ("GIHON", r"gihon"),
+    ("PST", r"\bpst\b|persada sokka"),
+    ("EBT", r"\bebt\b|era bangun"),
+    ("EDOTCO", r"edotco"),
+    ("IBSW", r"ibsw|infrastruktur bisnis sejahtera"),
+    ("IBS", r"inti bangun sejahtera|\bibs\b"),
+    ("KIRANA", r"kirana"),
+    ("TRIVIEW", r"triview"),
+    ("GAMETRACO", r"gametraco"),
+    ("MSN", r"\bmsn\b|menara selular"),
+    ("MASSADA", r"massada"),
+    ("WINET", r"winet|wireless network"),
+    ("STP", r"\bstp\b|solusi tunas"),
+    ("IOH", r"^ioh$|indosat"),
+]
+# SoW (A) cadangan (dari dokumen referensi) bila sheet performance tidak memuat ToCo tersebut.
+DEFAULT_SOW = {"PTI": 21449, "DMT": 12004, "TBG": 11358, "CMI": 8009, "DHOST": 847, "BALI TOWER": 638,
+               "GIHON": 530, "EBT": 269, "EDOTCO": 97, "IBSW": 92, "KIRANA": 46, "TRIVIEW": 42,
+               "GAMETRACO": 33, "MSN": 29, "MASSADA": 24, "WINET": 20}
+
+SITE_STATUS = "Site Status (Up/Down/LTOA/ Plan to Relocate)"
 CATEGORIES = {
     "Access Issue": dict(
-        sheet="List Access Issue", month="Month Open", status="Case Status (Open/Closed)", tlp="GROUP",
-        cause="Problem Type", cause_label="Main Cause", severity="Severity", aging="Aging Time (Days)",
-        year="Year Open", site=["Site ID", "Site ID IOH", "Site Name", "Remarks from FLM"], icon="🚧"),
+        sheet="List Access Issue", month="Month Open", status="Case Status (Open/Closed)",
+        toco=["GROUP1", "GROUP"], cause="Problem Type", root=["Header Case", "The Root Cause", "Root Cause", "Case"],
+        severity="Severity", aging="Aging Time (Days)", year="Year Open", site_id="Site ID",
+        impact=[f"{SITE_STATUS}_1", SITE_STATUS],
+        search=["Site ID", "Site ID IOH", "Site Name", "Remarks from FLM", "Case"], icon="🚧"),
     "Stolen": dict(
-        sheet="List Stolen", month="Month Open", status="Status TT ToCo/OpCo", tlp="Toco Group Name",
-        cause="Material Stolen", cause_rules=STOLEN_RULES, cause_label="Material Stolen",
-        severity="TT Status [Critical/Major]", aging="Aging TT", year="Year Open",
-        site=["IOH ID", "Old Site ID", "Site Name", "TT IOH", "Material Stolen"], icon="🔓"),
+        sheet="List Stolen", month="Month Open", status="Status TT ToCo/OpCo", toco=["Toco Group Name"],
+        cause="Material Stolen", cause_rules=STOLEN_RULES, root=[], severity="TT Status [Critical/Major]",
+        aging="Aging TT", year="Year Open", site_id="IOH ID", impact=[],
+        search=["IOH ID", "Old Site ID", "Site Name", "TT IOH", "Material Stolen"], icon="🔓"),
     "TT CME": dict(
-        sheet="TT CME", month="Create Month", status="STATUS TT TLP", tlp="Owner",
-        cause="Description", cause_rules=CME_RULES, cause_label="Kategori CME", severity="Severity",
-        aging="Aging TT CLOSED", year=None, site=["Site ID", "Site Name", "TT Number", "Description"],
-        backlog="Backlog", icon="🛠️"),
+        sheet="TT CME", month="Create Month", status="STATUS TT TLP", toco=["Owner"],
+        cause="Description", cause_rules=CME_RULES, root=[], severity="Severity", aging="Aging TT CLOSED",
+        year=None, site_id="Site ID", impact=[], backlog="Backlog",
+        search=["Site ID", "Site Name", "TT Number", "Description"], icon="🛠️"),
 }
 REGION_COL = "New Region"
 
-# Palet untuk latar gelap.
-BLUE, CYAN, PINK, YELLOW, PURPLE, TEAL, GREEN, RED, ORANGE = (
-    "#3b9cff", "#22d3ee", "#ff5c8a", "#fbbf24", "#a78bfa", "#2dd4bf", "#10d39a", "#ff4d6d", "#ff9f43")
-TEXT, TEXT_2, MUTED = "#e6edf8", "#c3cee6", "#8fa3c8"
-GRID = "rgba(148,170,220,0.14)"
-FONT = 'Inter, "Segoe UI", system-ui, sans-serif'
-SERIES = {
-    "A": ("A: Akumulasi TT open bulan sebelumnya", "#7c8db5"),
-    "B": ("B: TT baru per bulan", BLUE),
-    "C": ("C: Akumulasi TT open per bulan", YELLOW),
-    "D": ("D: TT close per bulan", GREEN),
-    "E": ("E: Sisa TT masih open [C−D]", RED),
-}
-
-st.set_page_config(page_title="TLP Escalation Dashboard", page_icon="📊", layout="wide",
-                   initial_sidebar_state="collapsed")
+# =====================================================================================
+# Gaya halaman (tema gelap Indosat)
+# =====================================================================================
 
 st.markdown(f"""
 <style>
-  .stApp {{background: radial-gradient(1200px 600px at 85% -10%, #1d3f8f 0%, rgba(29,63,143,0) 60%),
-                       linear-gradient(160deg, #081226 0%, #0c1c42 45%, #10285c 100%); background-attachment: fixed;}}
+  .stApp {{background:
+      radial-gradient(900px 500px at 92% -8%, rgba(226,0,116,.30) 0%, rgba(226,0,116,0) 60%),
+      radial-gradient(800px 500px at -5% 105%, rgba(0,163,173,.22) 0%, rgba(0,163,173,0) 60%),
+      radial-gradient(600px 400px at 60% 40%, rgba(255,209,0,.05) 0%, rgba(255,209,0,0) 70%),
+      linear-gradient(160deg, #0a0b14 0%, #11131f 50%, #0d0f1a 100%); background-attachment: fixed;}}
   [data-testid="stHeader"] {{background: transparent;}}
-  .block-container {{padding-top: 1.2rem; padding-bottom: 2rem; max-width: 1600px;}}
+  .block-container {{padding-top: 1.1rem; padding-bottom: 2rem; max-width: 1640px;}}
 
-  /* Header */
   .hdr {{display:flex; align-items:center; gap:14px;}}
-  .hdr .logo {{width:46px; height:46px; border-radius:12px; display:flex; align-items:center; justify-content:center;
-              background:linear-gradient(135deg,#ff9f43,#ff6b2c); color:#fff; font-weight:800; font-size:.8rem;
-              box-shadow:0 4px 14px rgba(255,120,50,.35);}}
+  .hdr .logo {{width:48px; height:48px; border-radius:14px; display:flex; align-items:center; justify-content:center;
+              background:conic-gradient(from 210deg, {MAGENTA}, {RED}, {YELLOW}, {TOSCA}, {MAGENTA});
+              color:#fff; font-weight:800; font-size:.78rem; text-shadow:0 1px 3px rgba(0,0,0,.5);
+              box-shadow:0 4px 18px rgba(226,0,116,.45);}}
   .hdr h1 {{font-size:1.45rem; margin:0; padding:0; color:{TEXT}; font-weight:800; letter-spacing:-.01em;}}
   .hdr .pill {{display:inline-block; margin-left:10px; padding:2px 10px; border-radius:999px; font-size:.68rem;
-              font-weight:600; color:#9ff3ff; background:rgba(34,211,238,.12); border:1px solid rgba(34,211,238,.45);
+              font-weight:700; color:{YELLOW}; background:rgba(255,209,0,.10); border:1px solid rgba(255,209,0,.5);
               vertical-align:middle;}}
   .hdr .sub {{color:{MUTED}; font-size:.78rem; margin-top:2px;}}
+  .lock {{display:inline-flex; align-items:center; gap:8px; padding:6px 12px; border-radius:10px; font-size:.78rem;
+          color:{TEXT_2}; background:rgba(0,163,173,.12); border:1px solid rgba(0,163,173,.45);}}
+  .lock b {{color:#fff;}}
+  .lock .dot {{width:8px; height:8px; border-radius:50%; background:{TOSCA}; box-shadow:0 0 8px {TOSCA};
+               animation: pulse 1.6s infinite;}}
+  @keyframes pulse {{0%,100% {{opacity:1}} 50% {{opacity:.35}}}}
 
-  /* Bar filter */
-  .st-key-filterbar {{background:rgba(14,30,68,.78); border:1px solid rgba(96,140,230,.28) !important;
-                      border-radius:16px; padding:10px 16px 4px 16px; box-shadow:0 8px 24px rgba(0,0,0,.25);}}
+  .st-key-filterbar {{background:{CARD}; border:1px solid rgba(226,0,116,.28) !important; border-radius:16px;
+                      padding:10px 16px 4px 16px; box-shadow:0 8px 24px rgba(0,0,0,.35);}}
   [data-testid="stWidgetLabel"] p {{text-transform:uppercase; font-size:.68rem !important; font-weight:700;
                                    letter-spacing:.06em; color:{MUTED} !important;}}
-  [data-baseweb="select"] > div, .stTextInput input {{background:rgba(8,20,48,.9) !important;
-                                   border-color:rgba(96,140,230,.35) !important;}}
+  [data-baseweb="select"] > div, .stTextInput input {{background:rgba(10,11,22,.9) !important;
+                                   border-color:rgba(226,0,116,.32) !important;}}
   .st-key-filterbar [data-baseweb="select"] div, .st-key-filterbar input {{font-size:.8rem !important;}}
-  .st-key-filterbar [data-baseweb="select"] > div {{padding-left:2px;}}
+  .st-key-filterbar [data-baseweb="tag"] {{background:rgba(226,0,116,.85) !important;}}
   .st-key-filterbar [data-testid="stColumn"] {{min-width:0;}}
 
-  /* Kartu KPI */
   .kpis {{display:grid; grid-template-columns:repeat(6, minmax(0,1fr)); gap:14px; margin:14px 0 6px;}}
-  .kpi {{background:rgba(14,30,68,.82); border:1px solid rgba(96,140,230,.22); border-top:3px solid var(--c);
-         border-radius:14px; padding:14px 16px 12px; min-height:118px; box-shadow:0 8px 22px rgba(0,0,0,.25);}}
+  .kpi {{background:{CARD}; border:1px solid rgba(255,255,255,.07); border-top:3px solid var(--c);
+         border-radius:14px; padding:14px 16px 12px; min-height:118px; box-shadow:0 8px 22px rgba(0,0,0,.3);}}
   .kpi .lbl {{font-size:.68rem; font-weight:700; letter-spacing:.06em; text-transform:uppercase; color:{TEXT_2};}}
   .kpi .val {{font-size:1.9rem; font-weight:800; color:var(--c); line-height:1.25; margin-top:6px;
               white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}}
   .kpi .val.txt {{font-size:1.25rem; margin-top:10px;}}
   .kpi .sub {{font-size:.74rem; color:{MUTED}; margin-top:4px;}}
 
-  /* Tab navigasi berbentuk pill */
-  [role="tablist"] {{gap:8px; flex-wrap:wrap; border-bottom:1px solid rgba(96,140,230,.2); padding-bottom:10px;}}
-  [data-testid="stTab"] {{background:rgba(14,30,68,.6); border:1px solid rgba(96,140,230,.2); border-radius:10px;
+  [role="tablist"] {{gap:8px; flex-wrap:wrap; border-bottom:1px solid rgba(226,0,116,.2); padding-bottom:10px;}}
+  [data-testid="stTab"] {{background:rgba(22,24,42,.7); border:1px solid rgba(255,255,255,.08); border-radius:10px;
                          padding:6px 14px !important; height:auto; transition:background .15s;}}
   [data-testid="stTab"] p {{font-size:.86rem; font-weight:600; color:{TEXT_2};}}
-  [data-testid="stTab"]:hover {{background:rgba(59,156,255,.16);}}
-  [data-testid="stTab"][aria-selected="true"] {{background:linear-gradient(135deg,#2f7df6,#3b9cff);
-                                               border-color:#3b9cff; box-shadow:0 4px 14px rgba(59,156,255,.35);}}
+  [data-testid="stTab"]:hover {{background:rgba(226,0,116,.16);}}
+  [data-testid="stTab"][aria-selected="true"] {{background:linear-gradient(135deg,{MAGENTA},#ff3d9a);
+                                               border-color:{MAGENTA}; box-shadow:0 4px 16px rgba(226,0,116,.45);}}
   [data-testid="stTab"][aria-selected="true"] p {{color:#fff;}}
   [role="tablist"] > :not([role="tab"]), [data-baseweb="tab-highlight"], [data-baseweb="tab-border"] {{display:none;}}
 
-  /* Kartu Executive Insight */
   .insights {{display:grid; grid-template-columns:repeat(4, minmax(0,1fr)); gap:14px; margin:6px 0 14px;}}
-  .ins {{background:rgba(14,30,68,.82); border:1px solid rgba(96,140,230,.22); border-left:4px solid var(--c);
-         border-radius:14px; padding:14px 16px; box-shadow:0 8px 22px rgba(0,0,0,.25);}}
+  .ins {{background:{CARD}; border:1px solid rgba(255,255,255,.07); border-left:4px solid var(--c);
+         border-radius:14px; padding:14px 16px; box-shadow:0 8px 22px rgba(0,0,0,.3);}}
   .ins h4 {{margin:0 0 6px; font-size:.92rem; color:{TEXT}; font-weight:700;}}
   .ins p {{margin:0; font-size:.83rem; line-height:1.5; color:{TEXT_2};}}
   .ins b {{color:#fff;}}
 
-  /* Kartu grafik */
-  [class*="st-key-card_"] {{background:rgba(14,30,68,.82); border:1px solid rgba(96,140,230,.22) !important;
-                            border-radius:14px; padding:12px 14px 6px; box-shadow:0 8px 22px rgba(0,0,0,.25);}}
+  .section {{font-size:1.02rem; font-weight:800; color:{TEXT}; margin:10px 0 6px; display:flex; gap:8px;
+             align-items:center;}}
+  .section .bar {{width:5px; height:20px; border-radius:3px;
+                 background:linear-gradient({MAGENTA},{YELLOW});}}
+  [class*="st-key-card_"] {{background:{CARD}; border:1px solid rgba(255,255,255,.07) !important;
+                            border-radius:14px; padding:12px 14px 6px; box-shadow:0 8px 22px rgba(0,0,0,.3);}}
   .ctitle {{font-size:.95rem; font-weight:700; color:{TEXT}; margin:2px 0 4px;}}
   .badge {{display:inline-block; font-size:.66rem; font-weight:700; padding:2px 7px; border-radius:6px;
            margin-right:8px; vertical-align:middle; color:var(--c); border:1px solid var(--c);
@@ -153,14 +224,128 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 
-# ---------- membaca .xlsb dengan pyxlsb ----------
+# =====================================================================================
+# Utilitas format
+# =====================================================================================
+
+def fmt(v) -> str:
+    return "-" if v is None or pd.isna(v) else f"{v:,.0f}".replace(",", ".")
+
+
+def pct(v, digits: int = 1) -> str:
+    return "-" if v is None or pd.isna(v) else f"{v:.{digits}f}%".replace(".", ",")
+
+
+def days(v) -> str:
+    return "-" if v is None or pd.isna(v) else f"{v:.2f}".replace(".", ",")
+
+
+def esc(s) -> str:
+    return html.escape(str(s))
+
+
+def toco_code(name) -> str:
+    text = " ".join(str(name).split())
+    low = text.lower()
+    for code, pattern in TOCO_RULES:
+        if re.search(pattern, low):
+            return code
+    return text.upper() if text and text.lower() not in ("nan", "none") else "(Kosong)"
+
+
+# =====================================================================================
+# Data bersama: upload, lock, log
+# =====================================================================================
+
+def read_log() -> list[dict]:
+    try:
+        return json.loads(LOG_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+
+
+def resolve_source() -> tuple[Path | None, dict]:
+    """File aktif: unggahan bersama terbaru, atau file .xlsb terbaru di folder aplikasi."""
+    if LATEST_FILE.exists():
+        log = read_log()
+        meta = log[-1] if log else {"uploader": "-", "timestamp": datetime.fromtimestamp(
+            LATEST_FILE.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S"), "filename": LATEST_FILE.name}
+        return LATEST_FILE, meta
+    local = sorted([p for p in APP_DIR.glob("*.xlsb") if not p.name.startswith("~$")],
+                   key=lambda p: p.stat().st_mtime, reverse=True)
+    if not local:
+        return None, {}
+    p = local[0]
+    return p, {"uploader": "File lokal", "filename": p.name,
+               "timestamp": datetime.fromtimestamp(p.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")}
+
+
+def source_signature() -> str:
+    path, _ = resolve_source()
+    if path is None:
+        return "none"
+    stat = path.stat()
+    return f"{path}:{stat.st_mtime_ns}:{stat.st_size}"
+
+
+def active_lock() -> dict | None:
+    try:
+        info = json.loads(LOCK_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if time.time() - info.get("since", 0) > LOCK_TIMEOUT_S:
+        return None
+    return info
+
+
+def save_upload(data: bytes, uploader: str, filename: str) -> dict:
+    """Simpan unggahan ke shared_data dengan lock agar dua unggahan tidak saling menimpa."""
+    SHARED_DIR.mkdir(exist_ok=True)
+    lock = active_lock()
+    if lock:
+        raise RuntimeError(f"Data sedang dikunci oleh {lock.get('uploader', '-')} sejak "
+                           f"{datetime.fromtimestamp(lock['since']):%H:%M:%S}. Coba lagi sebentar.")
+    LOCK_FILE.write_text(json.dumps({"uploader": uploader, "since": time.time()}), encoding="utf-8")
+    tmp = SHARED_DIR / "latest_tlp_data.tmp.xlsb"
+    try:
+        tmp.write_bytes(data)
+        with open_workbook(str(tmp)) as wb:
+            found = [c["sheet"] for c in CATEGORIES.values() if c["sheet"] in wb.sheets]
+        if not found:
+            raise ValueError("File tidak memuat sheet List Access Issue / List Stolen / TT CME.")
+        os.replace(tmp, LATEST_FILE)  # penggantian atomik: pembaca tidak pernah melihat file setengah jadi
+        entry = {"uploader": uploader, "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                 "filename": filename, "size_mb": round(len(data) / 1e6, 2), "sheets": found}
+        log = (read_log() + [entry])[-100:]
+        LOG_FILE.write_text(json.dumps(log, indent=2, ensure_ascii=False), encoding="utf-8")
+        return entry
+    finally:
+        tmp.unlink(missing_ok=True)
+        LOCK_FILE.unlink(missing_ok=True)
+
+
+def load_sow_override() -> dict[str, float]:
+    try:
+        return {k: float(v) for k, v in json.loads(SOW_FILE.read_text(encoding="utf-8")).items()}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_sow_override(values: dict[str, float]) -> None:
+    SHARED_DIR.mkdir(exist_ok=True)
+    SOW_FILE.write_text(json.dumps(values, indent=2), encoding="utf-8")
+
+
+# =====================================================================================
+# Membaca .xlsb dengan pyxlsb
+# =====================================================================================
 
 MAX_EMPTY_RUN = 500  # berhenti setelah 500 baris kosong berturut-turut
 
 
 def _clean_name(v, i: int, seen: dict) -> str:
     name = " ".join(str(v).split()) if v not in (None, "") else f"Kolom_{i + 1}"
-    if name in seen:  # nama kolom ganda diberi akhiran agar unik
+    if name in seen:  # nama kolom ganda diberi akhiran agar unik (mis. Site Status ..._1)
         seen[name] += 1
         name = f"{name}_{seen[name]}"
     else:
@@ -168,12 +353,9 @@ def _clean_name(v, i: int, seen: dict) -> str:
     return name
 
 
-def read_sheet(wb, sheet: str) -> pd.DataFrame:
-    """Baca satu sheet dari workbook pyxlsb yang sudah dibuka; baris pertama = header.
-
-    Sebagian sheet (mis. List Stolen) berformat sampai ~1 juta baris walau datanya hanya
-    belasan ribu; pembacaan dihentikan setelah deretan baris kosong agar tetap cepat.
-    """
+def _sheet_rows(wb, sheet: str) -> list[list]:
+    """Semua baris berisi dari satu sheet. Sheet yang berformat sampai ~1 juta baris walau
+    datanya belasan ribu dihentikan setelah deretan baris kosong agar tetap cepat."""
     rows, empty_run = [], 0
     with wb.get_sheet(sheet) as sh:
         for r in sh.rows(sparse=True):
@@ -185,6 +367,10 @@ def read_sheet(wb, sheet: str) -> pd.DataFrame:
                 continue
             empty_run = 0
             rows.append(vals)
+    return rows
+
+
+def _rows_to_frame(rows: list[list]) -> pd.DataFrame:
     if not rows:
         return pd.DataFrame()
     seen: dict = {}
@@ -194,16 +380,43 @@ def read_sheet(wb, sheet: str) -> pd.DataFrame:
     return pd.DataFrame(body, columns=header).dropna(how="all")
 
 
-@st.cache_data(show_spinner="Membaca file .xlsb (pyxlsb)…", max_entries=4)
-def load_all(key: str, _source: str | bytes) -> dict[str, pd.DataFrame]:
-    # `key` (path + waktu ubah / nama unggahan) menjadi kunci cache; isi file tidak di-hash.
+def _extract_sow(rows: list[list]) -> dict[str, float]:
+    """Cari tabel 'ToCo | SoW (A)' / 'ToCo | Total Sites' di sheet performance dan baca isinya."""
+    out: dict[str, float] = {}
+    for r, row in enumerate(rows):
+        for c in range(1, len(row)):
+            head = str(row[c] or "").strip().lower()
+            left = str(row[c - 1] or "").strip().lower()
+            if left != "toco" or head not in ("sow (a)", "total sites"):
+                continue
+            for below in rows[r + 1:]:
+                name = below[c - 1] if c - 1 < len(below) else None
+                val = below[c] if c < len(below) else None
+                if name in (None, "") or not isinstance(val, (int, float)):
+                    break
+                out.setdefault(toco_code(name), float(val))
+    return out
+
+
+@st.cache_data(show_spinner="Membaca file .xlsb (pyxlsb)…", max_entries=3)
+def load_workbook(signature: str, path: str) -> tuple[dict[str, pd.DataFrame], dict[str, float]]:
+    # `signature` (path + waktu ubah + ukuran) menjadi kunci cache: data baru otomatis dibaca ulang.
     # Workbook dibuka sekali saja: membuka ulang = membaca ulang shared strings (lambat).
-    src = io.BytesIO(_source) if isinstance(_source, bytes) else _source
-    with open_workbook(src) as wb:
-        return {k: read_sheet(wb, cfg["sheet"]) for k, cfg in CATEGORIES.items() if cfg["sheet"] in wb.sheets}
+    sheets, sow = {}, {}
+    with open_workbook(path) as wb:
+        for cat, cfg in CATEGORIES.items():
+            if cfg["sheet"] in wb.sheets:
+                sheets[cat] = _rows_to_frame(_sheet_rows(wb, cfg["sheet"]))
+        for name in ["performance access", "Performance Stolen", "sheet tambahan ke TLP"]:
+            if name in wb.sheets:
+                for k, v in _extract_sow(_sheet_rows(wb, name)).items():
+                    sow.setdefault(k, v)
+    return sheets, sow
 
 
-# ---------- persiapan data ----------
+# =====================================================================================
+# Persiapan data
+# =====================================================================================
 
 def to_period(s: pd.Series) -> pd.Series:
     """'Oct_2025' / tanggal / serial Excel -> Period bulanan."""
@@ -230,8 +443,18 @@ def _col(df: pd.DataFrame, name: str | None, default="(Kosong)") -> pd.Series:
     return pd.Series(default, index=df.index, dtype="string")
 
 
-@st.cache_data(show_spinner=False, max_entries=8)
-def prepare(key: str, _df: pd.DataFrame, cat: str) -> pd.DataFrame:
+def _first(df: pd.DataFrame, names: list[str]) -> str | None:
+    return next((n for n in names if n in df.columns and df[n].notna().any()), None)
+
+
+def _clean_root(s: pd.Series) -> pd.Series:
+    s = s.str.replace(r"\s+", " ", regex=True).str.strip()
+    s = s.str.replace(r"(?i)^kompesasi", "Kompensasi", regex=True)
+    return s.where(s.isin(["(Kosong)"]), s.str.slice(0, 1).str.upper() + s.str.slice(1))
+
+
+@st.cache_data(show_spinner=False, max_entries=6)
+def prepare(signature: str, _df: pd.DataFrame, cat: str) -> pd.DataFrame:
     cfg = CATEGORIES[cat]
     df = _df.copy()
     df["_period"] = to_period(df[cfg["month"]]) if cfg["month"] in df.columns else pd.NaT
@@ -239,24 +462,49 @@ def prepare(key: str, _df: pd.DataFrame, cat: str) -> pd.DataFrame:
     status = _col(df, cfg["status"], "").str.lower()
     df["_status"] = status.map(lambda s: "Open" if s == "open" else "Cancel" if s.startswith("cancel")
                                else "Closed" if s.startswith("close") else "Lainnya")
+    df["_cat"] = cat
     df["_region"] = _col(df, REGION_COL)
-    df["_tlp"] = _col(df, cfg["tlp"])
+    df["_toco"] = _col(df, _first(df, cfg["toco"])).map(toco_code)
     raw_cause = _col(df, cfg["cause"])
     df["_cause"] = classify(raw_cause, cfg["cause_rules"]) if cfg.get("cause_rules") else raw_cause
+    root_col = _first(df, cfg["root"])
+    df["_root"] = _clean_root(_col(df, root_col)) if root_col else df["_cause"]
     df["_sev"] = _col(df, cfg["severity"]).str.title()
-    aging = pd.to_numeric(df[cfg["aging"]], errors="coerce") if cfg["aging"] in df.columns else pd.Series(
-        float("nan"), index=df.index)
+    aging = (pd.to_numeric(df[cfg["aging"]], errors="coerce") if cfg["aging"] in df.columns
+             else pd.Series(float("nan"), index=df.index))
     df["_aging"] = aging.where(aging >= 0)  # aging negatif = salah input tanggal, diabaikan dari MTTR
     df["_year"] = (_col(df, cfg["year"]).str.replace(r"\.0$", "", regex=True) if cfg["year"]
                    else df["_period"].dt.year.astype("string"))
     df["_backlog"] = _col(df, cfg.get("backlog"), "Normal TT")
     df["_month"] = df["_period"].dt.strftime("%b_%Y")
-    df["_search"] = (pd.concat([_col(df, c, "") for c in cfg["site"] if c in df.columns], axis=1)
-                     .agg(" ".join, axis=1).str.lower()) if any(c in df.columns for c in cfg["site"]) else ""
+    df["_site"] = _col(df, cfg["site_id"], "")
+    impact_col = _first(df, cfg["impact"])
+    df["_impact"] = _col(df, impact_col, "").str.lower().eq("down") if impact_col else False
+    present = [c for c in cfg["search"] if c in df.columns]
+    df["_search"] = (pd.concat([_col(df, c, "") for c in present], axis=1).agg(" ".join, axis=1).str.lower()
+                     if present else "")
     return df
 
 
-# ---------- perhitungan ----------
+def apply_filters(df: pd.DataFrame, f: dict, *, status: bool = True, month: bool = True) -> pd.DataFrame:
+    for col, key in [("_year", "years"), ("_region", "regions"), ("_toco", "tlp"), ("_cause", "cause"),
+                     ("_sev", "sev")]:
+        if f[key]:
+            df = df[df[col].isin(f[key])]
+    if f["backlog"]:  # Backlog hanya berlaku untuk TT CME
+        df = df[(df["_cat"] != "TT CME") | df["_backlog"].isin(f["backlog"])]
+    if f["q"]:
+        df = df[df["_search"].str.contains(re.escape(f["q"].lower()), regex=True, na=False)]
+    if month and f["months"]:
+        df = df[df["_month"].isin(f["months"])]
+    if status:
+        df = df[df["_status"].isin(f["status"])] if f["status"] else df[df["_status"] != "Cancel"]
+    return df
+
+
+# =====================================================================================
+# Perhitungan
+# =====================================================================================
 
 def backlog_summary(df: pd.DataFrame, months: list) -> pd.DataFrame:
     """Tabel A–E per bulan. TT sebelum bulan pertama tidak dihitung (A awal = 0)."""
@@ -274,23 +522,40 @@ def backlog_summary(df: pd.DataFrame, months: list) -> pd.DataFrame:
     return out
 
 
-def fmt(v) -> str:
-    return f"{v:,.0f}".replace(",", ".")
+def impact_table(access: pd.DataFrame, stolen: pd.DataFrame, sow: dict[str, float]) -> pd.DataFrame:
+    """Tabel per ToCo seperti sheet performance: SoW (A), TT & sites impact service, stolen."""
+    imp = access[access["_impact"] & access["_status"].isin(["Open", "Closed"])] if len(access) else access
+    st_ = stolen[stolen["_status"].isin(["Open", "Closed"])] if len(stolen) else stolen
+    t = pd.DataFrame({
+        "SoW (A)": pd.Series(sow, dtype=float),
+        "Total TT Impact Service Released": imp.groupby("_toco").size() if len(imp) else pd.Series(dtype=float),
+        "Total Sites Impact Service (B)": imp.groupby("_toco")["_site"].nunique() if len(imp) else pd.Series(dtype=float),
+        "MTTR Average (Days)": imp.groupby("_toco")["_aging"].mean() if len(imp) else pd.Series(dtype=float),
+        "Total TT Stolen": st_.groupby("_toco").size() if len(st_) else pd.Series(dtype=float),
+        "Total Sites Stolen": st_.groupby("_toco")["_site"].nunique() if len(st_) else pd.Series(dtype=float),
+    })
+    for c in ["Total TT Impact Service Released", "Total Sites Impact Service (B)", "Total TT Stolen",
+              "Total Sites Stolen"]:
+        t[c] = t[c].fillna(0)
+    t["% (B/A)"] = t["Total Sites Impact Service (B)"] / t["SoW (A)"].where(t["SoW (A)"] > 0) * 100
+    t["% Stolen / SoW"] = t["Total Sites Stolen"] / t["SoW (A)"].where(t["SoW (A)"] > 0) * 100
+    t = t[(t["SoW (A)"].fillna(0) > 0) | (t["Total TT Impact Service Released"] > 0) | (t["Total TT Stolen"] > 0)]
+    t = t.drop(index=["(Kosong)"], errors="ignore")
+    t = t.sort_values(["SoW (A)", "Total TT Impact Service Released"], ascending=False, na_position="last")
+    t.index.name = "ToCo"
+    return t
 
 
-def pct(v, digits: int = 1) -> str:
-    return "-" if pd.isna(v) else f"{v:.{digits}f}%".replace(".", ",")
+def top_n(series: pd.Series, n: int = 5, other: str = "Lainnya") -> pd.Series:
+    s = series[series > 0].sort_values(ascending=False)
+    if len(s) <= n:
+        return s
+    return pd.concat([s.head(n), pd.Series({other: s.iloc[n:].sum()})])
 
 
-def days(v) -> str:
-    return "-" if pd.isna(v) else f"{v:.2f}".replace(".", ",")
-
-
-def esc(s) -> str:
-    return html.escape(str(s))
-
-
-# ---------- gaya grafik gelap ----------
+# =====================================================================================
+# Grafik (tema gelap)
+# =====================================================================================
 
 def dark(fig: go.Figure, height: int, legend_top: bool = True) -> go.Figure:
     fig.update_layout(
@@ -299,16 +564,16 @@ def dark(fig: go.Figure, height: int, legend_top: bool = True) -> go.Figure:
         margin=dict(l=8, r=8, t=46 if legend_top else 16, b=8),
         legend=dict(orientation="h", x=0.5, xanchor="center", y=1.04, yanchor="bottom",
                     font=dict(size=11, color=TEXT_2), itemsizing="constant", bgcolor="rgba(0,0,0,0)"),
-        hoverlabel=dict(bgcolor="#0f2350", bordercolor="#3b9cff", font=dict(family=FONT, color=TEXT)),
+        hoverlabel=dict(bgcolor="#1b1d33", bordercolor=MAGENTA, font=dict(family=FONT, color=TEXT)),
         bargap=0.28, barcornerradius=4,
     )
-    fig.update_xaxes(gridcolor=GRID, linecolor="rgba(148,170,220,.3)", zeroline=False, tickfont=dict(color=TEXT_2))
+    fig.update_xaxes(gridcolor=GRID, linecolor="rgba(200,200,230,.25)", zeroline=False, tickfont=dict(color=TEXT_2))
     fig.update_yaxes(gridcolor=GRID, linecolor="rgba(0,0,0,0)", zeroline=False, tickfont=dict(color=MUTED))
     return fig
 
 
 def wrap(label, width: int = 14) -> str:
-    """Pecah label kategori panjang jadi beberapa baris agar label sumbu-x tidak bertumpuk."""
+    """Pecah label panjang jadi beberapa baris agar label sumbu tidak bertumpuk."""
     words, lines, cur = str(label).split(), [], ""
     for w in words:
         if cur and len(cur) + 1 + len(w) > width:
@@ -324,6 +589,82 @@ def bar_text(values, fmt_fn=fmt):
     return [fmt_fn(v) if pd.notna(v) else "" for v in values]
 
 
+def empty_fig(msg: str, height: int = 320) -> go.Figure:
+    fig = go.Figure()
+    fig.add_annotation(text=msg, showarrow=False, font=dict(color=MUTED, size=13), x=0.5, y=0.5,
+                       xref="paper", yref="paper")
+    dark(fig, height, legend_top=False)
+    fig.update_xaxes(visible=False)
+    fig.update_yaxes(visible=False)
+    return fig
+
+
+def pie_3d(labels, values, colors, *, hole: float = 0.0, texts=None, height: int = 380,
+           center: str | None = None) -> go.Figure:
+    """Pie bergaya '3D': irisan sedikit ditarik, tepi gelap, dan bayangan elips di bawahnya."""
+    values = [float(v) for v in values]
+    fig = go.Figure()
+    # Lapisan bayangan (pie lebih gelap sedikit di bawah) memberi kesan ketebalan.
+    fig.add_trace(go.Pie(labels=labels, values=values, hole=hole, sort=False, direction="clockwise",
+                         rotation=90, domain=dict(x=[0.02, 0.98], y=[0.0, 0.92]), showlegend=False,
+                         marker=dict(colors=["rgba(0,0,0,.55)"] * len(values), line=dict(width=0)),
+                         textinfo="none", hoverinfo="skip"))
+    fig.add_trace(go.Pie(
+        labels=labels, values=values, hole=hole, sort=False, direction="clockwise", rotation=90,
+        domain=dict(x=[0.02, 0.98], y=[0.06, 0.98]),
+        pull=[0.04] + [0.02] * (len(values) - 1),
+        marker=dict(colors=colors, line=dict(color=BG, width=2)),
+        text=texts, texttemplate="%{text}" if texts else "%{value:,.0f}<br>%{percent}",
+        textposition="auto", insidetextorientation="horizontal",
+        textfont=dict(size=12, color="#ffffff", family=FONT),
+        outsidetextfont=dict(size=11, color=TEXT_2),
+        hovertemplate="<b>%{label}</b><br>%{value:,.0f} (%{percent})<extra></extra>",
+    ))
+    dark(fig, height, legend_top=False)
+    fig.update_layout(showlegend=True, margin=dict(l=10, r=10, t=10, b=10),
+                      legend=dict(orientation="h", x=0.5, xanchor="center", y=-0.04, yanchor="top",
+                                  font=dict(size=11, color=TEXT_2)),
+                      uniformtext=dict(minsize=9, mode="hide"))
+    if center:
+        fig.add_annotation(text=center, showarrow=False, x=0.5, y=0.52, xref="paper", yref="paper",
+                           font=dict(size=13, color=TEXT, family=FONT))
+    return fig
+
+
+def impact_donut(t: pd.DataFrame) -> go.Figure:
+    s = top_n(t["Total TT Impact Service Released"], 5)
+    if s.empty:
+        return empty_fig("Belum ada TT impact service pada filter ini.")
+    total = s.sum()
+    texts = [f"{fmt(v)}<br>{k}<br>{pct(v / total * 100, 0)}" for k, v in s.items()]
+    return pie_3d(list(s.index), list(s.values), PALETTE[:len(s)], hole=0.45, texts=texts,
+                  center=f"<b>{fmt(total)}</b><br><span style='font-size:11px'>TT Impact</span>")
+
+
+def sow_pie(a: float, b: float, label_b: str, color_b: str) -> go.Figure:
+    """Pie SoW (A) vs bagian B; persentase B = B / A seperti kolom % (B/A) di Excel."""
+    if not a or pd.isna(a):
+        return empty_fig("SoW (A) untuk TLP ini belum diisi — atur di tabel SoW.")
+    b = min(b, a)
+    p = b / a * 100
+    texts = [f"{fmt(a)}; {pct(100 - p, 2)}", f"{fmt(b)}; {pct(p, 2)}"]
+    fig = pie_3d([f"SoW (A)", label_b], [a - b, b], [MAGENTA, color_b], texts=texts)
+    fig.data[1].customdata = [a, b]
+    fig.data[1].hovertemplate = "<b>%{label}</b><br>%{customdata:,.0f} site<extra></extra>"
+    fig.data[1].pull = [0, 0.12]
+    return fig
+
+
+def root_cause_pie(d: pd.DataFrame, height: int = 380) -> go.Figure:
+    s = top_n(d.loc[d["_root"] != "(Kosong)", "_root"].value_counts(), 5)
+    if s.empty:
+        return empty_fig("Kolom root cause / header case kosong pada filter ini.")
+    total = s.sum()
+    texts = [f"{fmt(v)}; {pct(v / total * 100, 0)}" for v in s.values]
+    labels = [wrap(k, 28) for k in s.index]
+    return pie_3d(labels, list(s.values), PALETTE[:len(s)], texts=texts, height=height)
+
+
 def summary_chart(t: pd.DataFrame) -> go.Figure:
     x, n = t.index.tolist(), len(t)
     fig = go.Figure()
@@ -331,14 +672,14 @@ def summary_chart(t: pd.DataFrame) -> go.Figure:
         name, color = SERIES[key]
         fig.add_trace(go.Bar(
             x=x, y=t[key], name=name, marker_color=color, text=bar_text(t[key]),
-            # Label vertikal di ujung bar: 4 bar per bulan tidak cukup lebar untuk label mendatar.
+            # Label vertikal: 4 bar per bulan tidak cukup lebar untuk label mendatar.
             textposition="outside", textangle=-90 if n > 6 else 0, textfont=dict(size=10, color=TEXT_2),
             cliponaxis=False, hovertemplate=f"<b>%{{x}}</b><br>{name}: %{{y:,.0f}}<extra></extra>"))
     name, color = SERIES["E"]
     fig.add_trace(go.Scatter(
         x=x, y=t["E"], name=name, yaxis="y2", mode="lines+markers+text", text=bar_text(t["E"]),
         textposition="top center", textfont=dict(size=11, color=color), cliponaxis=False,
-        line=dict(color=color, width=2.5), marker=dict(size=8, color=color, line=dict(color="#0c1c42", width=2)),
+        line=dict(color=color, width=2.5), marker=dict(size=8, color=color, line=dict(color=BG, width=2)),
         hovertemplate=f"<b>%{{x}}</b><br>{name}: %{{y:,.0f}}<extra></extra>"))
     bar_max = float(t[["A", "B", "C", "D"]].to_numpy().max() or 1)
     e_max = float(t["E"].max() or 1)
@@ -359,7 +700,7 @@ def summary_chart(t: pd.DataFrame) -> go.Figure:
 
 def progress_chart(t: pd.DataFrame) -> go.Figure:
     fig = go.Figure()
-    for col, color, pos in [("Progress (%)", GREEN, "inside"), ("Remaining (%)", RED, "outside")]:
+    for col, color, pos in [("Progress (%)", TOSCA, "inside"), ("Remaining (%)", RED, "outside")]:
         fig.add_trace(go.Bar(x=t.index, y=t[col], name=col.replace(" (%)", ""), marker_color=color,
                              text=bar_text(t[col], pct), textposition=pos, insidetextanchor="middle",
                              textangle=0, textfont=dict(size=10, color="#fff" if pos == "inside" else TEXT_2),
@@ -371,10 +712,12 @@ def progress_chart(t: pd.DataFrame) -> go.Figure:
 
 
 def open_close_region(d: pd.DataFrame) -> go.Figure:
+    if d.empty:
+        return empty_fig("Tidak ada data.")
     ct = pd.crosstab(d["_region"], d["_status"]).reindex(columns=["Closed", "Open"], fill_value=0)
     ct = ct.loc[ct.sum(axis=1).sort_values(ascending=False).index]
     fig = go.Figure()
-    for col, color, label in [("Closed", BLUE, "CLOSE"), ("Open", PINK, "OPEN")]:
+    for col, color, label in [("Closed", TOSCA, "CLOSE"), ("Open", MAGENTA, "OPEN")]:
         fig.add_trace(go.Bar(x=ct.index, y=ct[col], name=label, marker_color=color, text=bar_text(ct[col]),
                              textposition="outside", textfont=dict(size=11, color=TEXT_2), cliponaxis=False,
                              hovertemplate=f"<b>%{{x}}</b><br>{label}: %{{y:,.0f}}<extra></extra>"))
@@ -385,27 +728,30 @@ def open_close_region(d: pd.DataFrame) -> go.Figure:
 
 def mttr_by(d: pd.DataFrame, col: str, top: int = 12, height: int = 360) -> go.Figure:
     closed = d[d["_status"].eq("Closed")]
-    g = closed.groupby(col)["_aging"].agg(["mean", "size"]).sort_values("size", ascending=False).head(top)
-    g = g.sort_values("mean", ascending=False)
+    g = closed.groupby(col)["_aging"].agg(["mean", "size"]).dropna()
+    if g.empty:
+        return empty_fig("Belum ada tiket CLOSE pada filter ini.", height)
+    g = g.sort_values("size", ascending=False).head(top).sort_values("mean", ascending=False)
     avg = closed["_aging"].mean()
     fig = go.Figure(go.Bar(
-        x=[wrap(i) for i in g.index], y=g["mean"], marker_color=[RED if v > avg else GREEN for v in g["mean"]],
+        x=[wrap(i) for i in g.index], y=g["mean"], marker_color=[RED if v > avg else TOSCA for v in g["mean"]],
         text=[f"{days(v)} d" for v in g["mean"]], textposition="outside", textfont=dict(size=11, color=TEXT_2),
         cliponaxis=False, customdata=g["size"],
         hovertemplate="<b>%{x}</b><br>MTTR: %{y:.2f} hari<br>%{customdata:,} tiket close<extra></extra>"))
-    if pd.notna(avg):
-        fig.add_hline(y=avg, line=dict(color=YELLOW, dash="dash", width=1.5),
-                      annotation_text=f"Rata-rata {days(avg)} d", annotation_position="top right",
-                      annotation_font=dict(color=YELLOW, size=11))
+    fig.add_hline(y=avg, line=dict(color=YELLOW, dash="dash", width=1.5),
+                  annotation_text=f"Rata-rata {days(avg)} d", annotation_position="top right",
+                  annotation_font=dict(color=YELLOW, size=11))
     dark(fig, height, legend_top=False)
     fig.update_layout(showlegend=False, margin=dict(t=26),
-                      yaxis=dict(range=[0, (g["mean"].max() if len(g) else 1) * 1.22], title="hari"),
+                      yaxis=dict(range=[0, g["mean"].max() * 1.22], title="hari"),
                       xaxis=dict(tickangle=-30 if len(g) > 8 else 0, tickfont=dict(size=10)))
     return fig
 
 
-def ranked(d: pd.DataFrame, col: str, top: int = 10, color: str = TEAL, height: int = 360) -> go.Figure:
+def ranked(d: pd.DataFrame, col: str, top: int = 10, color: str = TOSCA, height: int = 360) -> go.Figure:
     vc = d[col].value_counts().head(top)[::-1]
+    if vc.empty:
+        return empty_fig("Tidak ada data.", height)
     share = vc / max(len(d), 1) * 100
     fig = go.Figure(go.Bar(
         y=vc.index, x=vc.values, orientation="h", marker_color=color,
@@ -414,17 +760,18 @@ def ranked(d: pd.DataFrame, col: str, top: int = 10, color: str = TEAL, height: 
         hovertemplate="<b>%{y}</b><br>%{x:,} TT<extra></extra>"))
     dark(fig, height, legend_top=False)
     fig.update_layout(showlegend=False, margin=dict(t=16, r=70),
-                      xaxis=dict(range=[0, (vc.max() if len(vc) else 1) * 1.3], showgrid=True),
-                      yaxis=dict(automargin=True))
+                      xaxis=dict(range=[0, vc.max() * 1.3], showgrid=True), yaxis=dict(automargin=True))
     return fig
 
 
 def pareto(d: pd.DataFrame, col: str, top: int = 15) -> go.Figure:
     vc = d[col].value_counts()
-    cum = vc.cumsum() / max(vc.sum(), 1) * 100
+    if vc.empty:
+        return empty_fig("Tidak ada data.", 400)
+    cum = vc.cumsum() / vc.sum() * 100
     vc, cum = vc.head(top), cum.head(top)
-    fig = go.Figure()
     labels = [wrap(i) for i in vc.index]
+    fig = go.Figure()
     fig.add_trace(go.Bar(x=labels, y=vc.values, name="Jumlah TT", marker_color=PURPLE, text=bar_text(vc.values),
                          textposition="outside", textfont=dict(size=11, color=TEXT_2), cliponaxis=False,
                          hovertemplate="<b>%{x}</b><br>%{y:,} TT<extra></extra>"))
@@ -434,7 +781,7 @@ def pareto(d: pd.DataFrame, col: str, top: int = 15) -> go.Figure:
                              line=dict(color=YELLOW, width=2), marker=dict(size=7),
                              hovertemplate="<b>%{x}</b><br>Kumulatif: %{y:.1f}%<extra></extra>"))
     dark(fig, 400)
-    fig.update_layout(yaxis=dict(range=[0, (vc.max() if len(vc) else 1) * 1.6]),
+    fig.update_layout(yaxis=dict(range=[0, vc.max() * 1.6]),
                       yaxis2=dict(overlaying="y", side="right", range=[-60, 115], showgrid=False,
                                   tickvals=[0, 50, 100], ticksuffix="%", tickfont=dict(color=YELLOW)),
                       xaxis=dict(tickangle=-30 if len(vc) > 8 else 0, tickfont=dict(size=10)))
@@ -442,10 +789,12 @@ def pareto(d: pd.DataFrame, col: str, top: int = 15) -> go.Figure:
 
 
 def monthly_status(d: pd.DataFrame) -> go.Figure:
+    if d.empty:
+        return empty_fig("Tidak ada data.")
     ct = pd.crosstab(d["_period"], d["_status"]).reindex(columns=["Closed", "Open"], fill_value=0).sort_index()
     x = [p.strftime("%b_%Y") for p in ct.index]
     fig = go.Figure()
-    for col, color, label in [("Closed", BLUE, "CLOSE"), ("Open", PINK, "OPEN")]:
+    for col, color, label in [("Closed", TOSCA, "CLOSE"), ("Open", MAGENTA, "OPEN")]:
         fig.add_trace(go.Bar(x=x, y=ct[col], name=label, marker_color=color,
                              text=bar_text(ct[col].where(ct[col] > 0)), textposition="inside",
                              insidetextanchor="middle", textangle=0, textfont=dict(size=10, color="#fff"),
@@ -455,187 +804,331 @@ def monthly_status(d: pd.DataFrame) -> go.Figure:
                              textfont=dict(size=11, color=TEXT), showlegend=False, hoverinfo="skip"))
     dark(fig, 360)
     fig.update_layout(barmode="stack", uniformtext=dict(minsize=8, mode="hide"),
-                      yaxis=dict(range=[0, (total.max() if len(total) else 1) * 1.15]),
+                      yaxis=dict(range=[0, total.max() * 1.15]),
                       xaxis=dict(tickangle=-30 if len(x) > 8 else 0, showgrid=False))
     return fig
 
 
-def chart_card(key: str, badge: str, color: str, title: str, fig: go.Figure) -> None:
+def chart_card(key: str, badge: str, color: str, title: str, fig: go.Figure, exports: list | None = None) -> None:
     with st.container(key=f"card_{key}"):
         st.markdown(f"<div class='ctitle'><span class='badge' style='--c:{color}'>{esc(badge)}</span>"
                     f"{esc(title)}</div>", unsafe_allow_html=True)
         st.plotly_chart(fig, width="stretch", config={"displaylogo": False, "displayModeBar": False},
                         key=f"fig_{key}")
+    if exports is not None:
+        exports.append((title, fig))
 
 
-# ---------- sumber data ----------
+def section(title: str) -> None:
+    st.markdown(f"<div class='section'><span class='bar'></span>{esc(title)}</div>", unsafe_allow_html=True)
 
-files = sorted([p for p in APP_DIR.glob("*.xlsb") if not p.name.startswith("~$")],
-               key=lambda p: p.stat().st_mtime, reverse=True)
-# Kunci widget filter = "<nama>_<kategori>" (opsi berbeda per kategori); Reset Filter menghapus semuanya.
-FILTER_KEYS = ("f_year", "f_region", "f_tlp", "f_cause", "f_status", "f_month", "f_sev", "f_backlog", "f_q")
 
-head_l, head_r = st.columns([1.15, 1], vertical_alignment="center")
+# =====================================================================================
+# Export PowerPoint
+# =====================================================================================
+
+def build_pptx(figures: list[tuple[str, go.Figure]], meta: dict, kpis: list[tuple[str, str, str]],
+               filter_desc: str) -> bytes:
+    from pptx import Presentation
+    from pptx.dml.color import RGBColor
+    from pptx.enum.shapes import MSO_SHAPE
+    from pptx.enum.text import PP_ALIGN
+    from pptx.util import Emu, Inches, Pt
+
+    def rgb(h: str) -> RGBColor:
+        return RGBColor.from_string(h.lstrip("#")[:6])
+
+    prs = Presentation()
+    prs.slide_width, prs.slide_height = Inches(13.333), Inches(7.5)
+    blank = prs.slide_layouts[6]
+    W, H = prs.slide_width, prs.slide_height
+
+    def background(slide):
+        bg = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, 0, 0, W, H)
+        bg.fill.solid(); bg.fill.fore_color.rgb = rgb(BG); bg.line.fill.background()
+        stripe_w = Emu(int(W / 4))
+        for i, c in enumerate([MAGENTA, YELLOW, RED, TOSCA]):
+            s = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, stripe_w * i, 0, stripe_w, Inches(0.09))
+            s.fill.solid(); s.fill.fore_color.rgb = rgb(c); s.line.fill.background()
+
+    def text(slide, x, y, w, h, value, size, color=TEXT, bold=False, align=PP_ALIGN.LEFT):
+        tb = slide.shapes.add_textbox(x, y, w, h)
+        tf = tb.text_frame
+        tf.word_wrap = True
+        for i, line in enumerate(value if isinstance(value, list) else [value]):
+            p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
+            p.alignment = align
+            r = p.add_run()
+            r.text = line
+            r.font.size, r.font.bold, r.font.name = Pt(size), bold, "Segoe UI"
+            r.font.color.rgb = rgb(color)
+        return tb
+
+    # 1. Sampul
+    s = prs.slides.add_slide(blank)
+    background(s)
+    accent = s.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(0.8), Inches(2.0), Inches(0.12), Inches(2.2))
+    accent.fill.solid(); accent.fill.fore_color.rgb = rgb(MAGENTA); accent.line.fill.background()
+    text(s, Inches(1.1), Inches(1.9), Inches(11), Inches(1.0), "TLP Escalation Dashboard", 40, TEXT, True)
+    text(s, Inches(1.1), Inches(2.85), Inches(11), Inches(0.6),
+         "Laporan Access Issue · Stolen · TT CME", 20, YELLOW)
+    text(s, Inches(1.1), Inches(3.55), Inches(11), Inches(1.2), [
+        f"Data diunggah oleh: {meta.get('uploader', '-')}",
+        f"Update data terakhir: {meta.get('timestamp', '-')}  ·  File: {meta.get('filename', '-')}",
+    ], 14, TEXT_2)
+    text(s, Inches(1.1), Inches(5.3), Inches(11.5), Inches(0.9), f"Filter: {filter_desc}", 11, MUTED)
+    text(s, Inches(1.1), Inches(6.6), Inches(11), Inches(0.4),
+         f"Dibuat {datetime.now():%d-%m-%Y %H:%M}", 10, MUTED)
+
+    # 2. Ringkasan KPI
+    s = prs.slides.add_slide(blank)
+    background(s)
+    text(s, Inches(0.6), Inches(0.35), Inches(12), Inches(0.7), "Ringkasan Kinerja", 26, TEXT, True)
+    gap, top = Inches(0.25), Inches(1.6)
+    card_w = Emu(int((W - Inches(1.2) - gap * 2) / 3))
+    card_h = Inches(2.2)
+    for i, (label, value, sub) in enumerate(kpis):
+        x = Inches(0.6) + (card_w + gap) * (i % 3)
+        y = top + (card_h + gap) * (i // 3)
+        color = [MAGENTA, TOSCA, RED, YELLOW, PURPLE, TOSCA_2][i % 6]
+        box = s.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, x, y, card_w, card_h)
+        box.adjustments[0] = 0.08
+        box.fill.solid(); box.fill.fore_color.rgb = rgb("#16182a"); box.line.color.rgb = rgb(color)
+        text(s, x + Inches(0.25), y + Inches(0.2), card_w - Inches(0.5), Inches(0.4), label.upper(), 12, TEXT_2, True)
+        text(s, x + Inches(0.25), y + Inches(0.65), card_w - Inches(0.5), Inches(0.9), value, 30, color, True)
+        text(s, x + Inches(0.25), y + Inches(1.55), card_w - Inches(0.5), Inches(0.5), sub, 12, MUTED)
+
+    # 3+. Satu grafik per slide (PNG resolusi tinggi via kaleido)
+    for title, fig in figures:
+        s = prs.slides.add_slide(blank)
+        background(s)
+        text(s, Inches(0.6), Inches(0.3), Inches(12), Inches(0.7), title, 22, TEXT, True)
+        f = go.Figure(fig)
+        f.update_layout(paper_bgcolor=BG, plot_bgcolor=BG, height=None, width=None)
+        # Kanvas lebih kecil + skala besar = teks & label tetap terbaca saat gambar dibentangkan di slide.
+        png = f.to_image(format="png", width=1150, height=552, scale=3)
+        s.shapes.add_picture(io.BytesIO(png), Inches(0.5), Inches(1.15), width=W - Inches(1.0))
+
+    buf = io.BytesIO()
+    prs.save(buf)
+    return buf.getvalue()
+
+
+# =====================================================================================
+# Header: judul, status data live, tombol aksi
+# =====================================================================================
+
+source_path, source_meta = resolve_source()
+current_sig = source_signature()
+if st.session_state.get("loaded_sig") not in (None, current_sig):
+    st.toast(f"📥 Data baru diunggah oleh {source_meta.get('uploader', '-')} — dashboard diperbarui.")
+st.session_state["loaded_sig"] = current_sig
+
+FILTER_KEYS = ("f_cat", "f_year", "f_region", "f_tlp", "f_cause", "f_status", "f_month", "f_sev", "f_backlog", "f_q")
+
+head_l, head_r = st.columns([1.05, 1], vertical_alignment="center")
 with head_r:
-    b1, b2, b3, b4 = st.columns([1.55, 1.05, 1, 1])
-    with b1.popover("📂 Update dari File Excel", width="stretch"):
-        upload = st.file_uploader("Unggah file .xlsb", type=["xlsb"], key="upload")
-        file_pick = None
-        if files:
-            labels = {f"{p.name} · {datetime.fromtimestamp(p.stat().st_mtime):%d-%m-%Y %H:%M}": p for p in files}
-            file_pick = labels[st.selectbox("Atau pilih file di folder aplikasi", list(labels))]
-        if st.button("🔄 Muat ulang data", width="stretch"):
-            st.cache_data.clear()
-            st.rerun()
-    with b2.popover("📘 Cara Update", width="stretch"):
+    b1, b2, b3, b4, b5 = st.columns([1.15, 1.0, 1.0, 1.05, 1.0])
+    with b1.popover("📂 Update Data", width="stretch"):
+        st.markdown("**Unggah file mingguan terbaru.** File menggantikan data untuk semua pengguna.")
+        uploader = st.text_input("Nama pengunggah", key="uploader_name", placeholder="mis. Ayu")
+        nonce = st.session_state.get("upload_nonce", 0)
+        up = st.file_uploader("File .xlsb", type=["xlsb"], key=f"upload_{nonce}")
+        if st.button("⬆️ Upload & Kunci Data", type="primary", width="stretch",
+                     disabled=up is None or not uploader.strip()):
+            try:
+                with st.spinner("Menyimpan & memvalidasi file…"):
+                    entry = save_upload(up.getvalue(), uploader.strip(), up.name)
+                st.session_state["upload_nonce"] = nonce + 1
+                st.toast(f"✅ {entry['filename']} tersimpan — semua pengguna akan ter-refresh.")
+                st.rerun()
+            except Exception as exc:  # file rusak / lock aktif / sheet tidak lengkap
+                st.error(str(exc))
+        if not uploader.strip():
+            st.caption("Isi nama pengunggah agar tercatat di log.")
+        log = read_log()
+        if log:
+            st.markdown("**Riwayat unggahan**")
+            st.dataframe(pd.DataFrame(log[::-1]).head(8)[["timestamp", "uploader", "filename"]],
+                         hide_index=True, width="stretch")
+    with b2.popover("📘 Panduan", width="stretch"):
         st.markdown(
-            f"1. Simpan file `.xlsb` terbaru ke folder **{APP_DIR}** (atau unggah lewat *Update dari File Excel*).\n"
-            "2. Pastikan sheet **List Access Issue**, **List Stolen**, dan **TT CME** ada, header di baris pertama.\n"
-            "3. Klik **Muat ulang data**. File terbaru otomatis dipilih.\n\n"
+            "1. Klik **Update Data**, isi nama, pilih file `.xlsb` mingguan, lalu **Upload & Kunci Data**.\n"
+            "2. File disimpan ke `shared_data/latest_tlp_data.xlsb`; log pengunggah di `upload_log.json`.\n"
+            f"3. Semua pengguna yang membuka dashboard otomatis ter-refresh (cek tiap {REFRESH_EVERY}).\n"
+            "4. Sheet wajib: **List Access Issue**, **List Stolen**, **TT CME** (header di baris pertama).\n"
+            "   SoW (A) dibaca dari sheet **performance access** bila ada.\n\n"
             "Grafik A–E: TT berstatus *Cancel* tidak dihitung (sama dengan pivot Summary).")
-    export_slot = b3.empty()
-    if b4.button("↻ Reset Filter", width="stretch"):
-        for k in [k for k in st.session_state if str(k).startswith(FILTER_KEYS) or k == "ae_range"]:
+    csv_slot = b3.empty()
+    ppt_slot = b4.empty()
+    if b5.button("↻ Reset Filter", width="stretch"):
+        for k in [k for k in st.session_state if str(k).startswith(FILTER_KEYS) or k in ("ae_range", "target_tlp")]:
             st.session_state.pop(k, None)
         st.rerun()
 
-if upload is not None:
-    source, source_name, cache_key = upload.getvalue(), upload.name, f"upload:{upload.name}:{upload.size}"
-    mtime = datetime.now()
-elif file_pick is not None:
-    source, source_name, cache_key = str(file_pick), file_pick.name, f"{file_pick}:{file_pick.stat().st_mtime}"
-    mtime = datetime.fromtimestamp(file_pick.stat().st_mtime)
-else:
-    source = None
-
 with head_l:
-    pill = f"<span class='pill'>{esc(source_name)}</span>" if source else ""
-    sub = (f"Sumber: <b>{esc(source_name)}</b> • Diperbarui: {mtime:%Y-%m-%d %H:%M:%S} • Dibaca dengan pyxlsb"
-           if source else "Belum ada file data")
+    pill = f"<span class='pill'>{esc(source_meta.get('filename', ''))}</span>" if source_path else ""
     st.markdown(f"<div class='hdr'><div class='logo'>TLP</div><div><h1>TLP Escalation Dashboard{pill}</h1>"
-                f"<div class='sub'>{sub}</div></div></div>", unsafe_allow_html=True)
+                f"<div class='sub'>Access Issue · Stolen · TT CME — dibaca dengan pyxlsb</div></div></div>",
+                unsafe_allow_html=True)
 
-if source is None:
-    st.info(f"Belum ada file .xlsb. Letakkan file di folder **{APP_DIR}** atau klik **Update dari File Excel**.")
+
+@st.fragment(run_every=REFRESH_EVERY)
+def live_status() -> None:
+    """Badge lock terakhir + auto-refresh: bila file bersama berubah, seluruh app dijalankan ulang."""
+    _, meta = resolve_source()
+    lock = active_lock()
+    if lock:
+        st.markdown(f"<span class='lock' style='border-color:{YELLOW}'><span class='dot' "
+                    f"style='background:{YELLOW}'></span>⏳ Sedang diunggah oleh <b>{esc(lock.get('uploader'))}</b>"
+                    "</span>", unsafe_allow_html=True)
+    else:
+        st.markdown(f"<span class='lock'><span class='dot'></span>🔒 Lock terakhir: "
+                    f"<b>{esc(meta.get('uploader', '-'))}</b> · {esc(meta.get('timestamp', '-'))}"
+                    f" · {esc(meta.get('filename', '-'))}</span>", unsafe_allow_html=True)
+    if source_signature() != st.session_state.get("loaded_sig"):
+        st.rerun(scope="app")
+
+
+live_status()
+
+if source_path is None:
+    st.info(f"Belum ada file .xlsb. Letakkan file di folder **{APP_DIR}** atau klik **Update Data**.")
     st.stop()
 
 try:
-    sheets = load_all(cache_key, source)
+    sheets, sow_from_file = load_workbook(current_sig, str(source_path))
 except Exception as exc:  # file rusak / bukan xlsb
-    st.error(f"Gagal membaca **{source_name}**: {exc}")
+    st.error(f"Gagal membaca **{source_meta.get('filename')}**: {exc}")
     st.stop()
 if not sheets:
     st.error("Sheet List Access Issue / List Stolen / TT CME tidak ditemukan di file ini.")
     st.stop()
 
+prepared = {cat: prepare(f"{current_sig}:{cat}", df, cat) for cat, df in sheets.items()}
+SOW = {**DEFAULT_SOW, **sow_from_file, **load_sow_override()}
 
-# ---------- bar filter horizontal ----------
 
-def opts(series: pd.Series, label: str, sort_by_count: bool = True) -> list[str]:
-    vals = series.value_counts().index.tolist() if sort_by_count else sorted(series.dropna().unique())
-    return [f"{ALL} {label}"] + [str(v) for v in vals]
+# =====================================================================================
+# Bar filter horizontal (multiselect)
+# =====================================================================================
+
+def options(frames: list[pd.DataFrame], col: str, by_count: bool = True) -> list[str]:
+    s = pd.concat([f[col] for f in frames]) if frames else pd.Series(dtype="string")
+    s = s[s != "(Kosong)"]
+    return [str(v) for v in (s.value_counts().index if by_count else sorted(s.dropna().unique()))]
 
 
 with st.container(key="filterbar"):
-    r1 = st.columns([1.15, 1.05, 1.15, 1.15, 1.25, 1.3, 1.1, 1.1, 1.35])
-    cat = r1[0].selectbox("Kategori", [c for c in CATEGORIES if c in sheets],
-                          format_func=lambda c: f"{CATEGORIES[c]['icon']} {c}", key="f_cat")
-    cfg = CATEGORIES[cat]
-    base = prepare(f"{cache_key}:{cat}", sheets[cat], cat)
-    if "backlog" in cfg:  # TT CME: default Normal TT seperti pivot Summary CME
-        bl_opts = opts(base["_backlog"], "Backlog")
-        bl_default = next((i for i, o in enumerate(bl_opts) if o.lower() == "normal tt"), 0)
-        f_backlog = r1[7].selectbox("Backlog", bl_opts, index=bl_default, key=f"f_backlog_{cat}")
-    else:
-        f_backlog = None
-    f_year = r1[1].selectbox("Years", opts(base["_year"], "Tahun", False)[:1]
-                             + sorted(opts(base["_year"], "Tahun")[1:], reverse=True), key=f"f_year_{cat}")
-    f_region = r1[2].selectbox("Region", opts(base["_region"], "Region"), key=f"f_region_{cat}")
-    f_tlp = r1[3].selectbox("TLP (ToCo)", opts(base["_tlp"], "TLP"), key=f"f_tlp_{cat}")
-    f_cause = r1[4].selectbox(cfg["cause_label"], opts(base["_cause"], "Kategori"), key=f"f_cause_{cat}")
-    status_opts = ["Semua Status", "Open", "Closed", "Cancel", "Semua + Cancel"]
-    f_status = r1[5].selectbox("Status", status_opts, key=f"f_status_{cat}",
-                               help="Semua Status = Open + Closed (tanpa Cancel, sama dengan pivot Summary).")
+    r1 = st.columns([1.3, 0.9, 1.1, 1.2, 1.5])
+    cats_avail = list(prepared)
+    f_cat = r1[0].multiselect("Kategori", cats_avail, default=[cats_avail[0]], key="f_cat",
+                              format_func=lambda c: f"{CATEGORIES[c]['icon']} {c}", placeholder="Semua kategori")
+    cats = f_cat or cats_avail
+    frames = [prepared[c] for c in cats]
+    base = pd.concat(frames, ignore_index=True)
+    f_year = r1[1].multiselect("Years", sorted(options(frames, "_year"), reverse=True), key="f_year",
+                               placeholder="Semua Tahun")
+    f_region = r1[2].multiselect("Region", options(frames, "_region"), key="f_region", placeholder="Semua Region")
+    f_tlp = r1[3].multiselect("TLP (ToCo)", options(frames, "_toco"), key="f_tlp", placeholder="Semua TLP")
+    cause_label = CATEGORIES[cats[0]]["cause"] if len(cats) == 1 else "Cause"
+    f_cause = r1[4].multiselect(f"Cause · {cause_label}" if len(cats) == 1 else "Cause",
+                                options(frames, "_cause"), key="f_cause", placeholder="Semua Cause")
+    r2 = st.columns([1.1, 1.3, 1.0, 1.0, 1.6])
+    f_status = r2[0].multiselect("Status", ["Open", "Closed", "Cancel"], key="f_status",
+                                 placeholder="Open + Closed",
+                                 help="Kosong = Open + Closed (tanpa Cancel, sama dengan pivot Summary).")
     months_all = sorted(base["_period"].unique())
-    f_month = r1[6].selectbox("Bulan (Open)", [f"{ALL} Bulan"] + [p.strftime("%b_%Y") for p in months_all[::-1]],
-                              key=f"f_month_{cat}")
-    if f_backlog is None:
-        f_sev = r1[7].selectbox("Severity", opts(base["_sev"], "Severity"), key=f"f_sev_{cat}")
+    f_month = r2[1].multiselect("Bulan (Open)", [p.strftime("%b_%Y") for p in months_all[::-1]], key="f_month",
+                                placeholder="Semua Bulan")
+    f_sev = r2[2].multiselect("Severity", options(frames, "_sev"), key="f_sev", placeholder="Semua Severity")
+    if "TT CME" in cats:
+        bl_opts = options([prepared["TT CME"]], "_backlog")
+        f_backlog = r2[3].multiselect("Backlog (CME)", bl_opts, key="f_backlog", placeholder="Semua Backlog",
+                                      default=[o for o in bl_opts if o.lower() == "normal tt"])
     else:
-        f_sev = ALL
-    f_q = r1[8].text_input("Cari Site / Issue", placeholder="Ketik Site ID, nama, TT, deskripsi…", key=f"f_q_{cat}")
+        f_backlog = []
+        r2[3].multiselect("Backlog (CME)", [], key="f_backlog_off", placeholder="Khusus TT CME", disabled=True)
+    f_q = r2[4].text_input("Cari Site / Issue", placeholder="Ketik Site ID, nama, TT, deskripsi…", key="f_q")
 
-# Filter dimensi (tanpa status) dipakai juga oleh grafik A–E, yang menghitung status sendiri.
-d = base
-for col, val in [("_year", f_year), ("_region", f_region), ("_tlp", f_tlp), ("_cause", f_cause),
-                 ("_sev", f_sev), ("_backlog", f_backlog)]:
-    if val and not str(val).startswith(ALL):
-        d = d[d[col] == val]
-if f_q.strip():
-    d = d[d["_search"].str.contains(re.escape(f_q.strip().lower()), regex=True, na=False)]
-dim = d[d["_status"] != "Cancel"]  # dasar grafik A–E (Cancel tidak dihitung, sama dengan pivot)
-if not f_month.startswith(ALL):
-    d = d[d["_month"] == f_month]
-if f_status == "Semua Status":
-    d = d[d["_status"] != "Cancel"]
-elif f_status != "Semua + Cancel":
-    d = d[d["_status"] == f_status]
+FILTERS = dict(years=f_year, regions=f_region, tlp=f_tlp, cause=f_cause, sev=f_sev, backlog=f_backlog,
+               q=f_q.strip(), months=f_month, status=f_status)
+d = apply_filters(base, FILTERS)
+dim = apply_filters(base, FILTERS, status=False, month=False)
+dim = dim[dim["_status"] != "Cancel"]  # dasar grafik A–E (Cancel tidak dihitung, sama dengan pivot)
+
+filter_parts = [f"Kategori: {', '.join(cats)}"]
+for label, vals in [("Tahun", f_year), ("Region", f_region), ("TLP", f_tlp), ("Cause", f_cause),
+                    ("Status", f_status or ["Open", "Closed"]), ("Bulan", f_month), ("Severity", f_sev),
+                    ("Backlog", f_backlog)]:
+    if vals:
+        filter_parts.append(f"{label}: {', '.join(map(str, vals))}")
+if FILTERS["q"]:
+    filter_parts.append(f"Cari: {FILTERS['q']}")
+filter_desc = " · ".join(filter_parts)
 
 export_cols = [c for c in d.columns if not c.startswith("_")]
-export_slot.download_button("⬇️ Export CSV", d[export_cols].to_csv(index=False).encode("utf-8-sig"),
-                            file_name=f"TLP_{cat.replace(' ', '_')}_{datetime.now():%Y%m%d_%H%M}.csv",
-                            mime="text/csv", width="stretch")
+csv_slot.download_button("⬇️ Export CSV", d[export_cols].to_csv(index=False).encode("utf-8-sig"),
+                         file_name=f"TLP_{'_'.join(c.replace(' ', '') for c in cats)}_{datetime.now():%Y%m%d_%H%M}.csv",
+                         mime="text/csv", width="stretch")
 
-# ---------- kartu KPI ----------
+
+# =====================================================================================
+# Kartu KPI
+# =====================================================================================
 
 total = len(d)
 closed = d[d["_status"] == "Closed"]
 open_ = d[d["_status"] == "Open"]
 close_rate = len(closed) / total * 100 if total else float("nan")
 mttr = closed["_aging"].mean()
-tlp_vc = d["_tlp"].value_counts()
+toco_vc = d["_toco"].value_counts()
 cause_vc = d["_cause"].value_counts()
+top_toco = (toco_vc.index[0], toco_vc.iloc[0]) if len(toco_vc) else ("-", 0)
+top_cause = (cause_vc.index[0], cause_vc.iloc[0]) if len(cause_vc) else ("-", 0)
+cat_title = cats[0] if len(cats) == 1 else "Gabungan"
+KPI_LIST = [
+    (f"Total TT {cat_title}", fmt(total), f"Dari {fmt(len(base))} total record"),
+    ("Ticket Closed", fmt(len(closed)), f"Close Rate: {pct(close_rate, 2)}"),
+    ("Ticket Masih Open", fmt(len(open_)), f"Avg Aging: {days(open_['_aging'].mean())} hari"),
+    ("Overall MTTR", f"{days(mttr)} d", f"Dari {fmt(len(closed))} tiket CLOSE"),
+    ("Top TLP Volume", str(top_toco[0]), f"{fmt(top_toco[1])} TT ({pct(top_toco[1] / max(total, 1) * 100)})"),
+    ("Top Cause", str(top_cause[0]), f"{fmt(top_cause[1])} TT ({pct(top_cause[1] / max(total, 1) * 100)})"),
+]
+KPI_COLORS = [MAGENTA, TOSCA, RED, YELLOW, PURPLE, TOSCA_2]
 
 
-def kpi(label, value, sub, color, text_value=False):
+def kpi_html(label, value, sub, color, text_value=False) -> str:
     cls = "val txt" if text_value else "val"
     return (f"<div class='kpi' style='--c:{color}'><div class='lbl'>{esc(label)}</div>"
-            f"<div class='{cls}' title='{esc(value)}'>{esc(value)}</div><div class='sub'>{sub}</div></div>")
+            f"<div class='{cls}' title='{esc(value)}'>{esc(value)}</div><div class='sub'>{esc(sub)}</div></div>")
 
 
-top_tlp = (tlp_vc.index[0], tlp_vc.iloc[0]) if len(tlp_vc) else ("-", 0)
-top_cause = (cause_vc.index[0], cause_vc.iloc[0]) if len(cause_vc) else ("-", 0)
-st.markdown("<div class='kpis'>" + "".join([
-    kpi(f"Total TT {cat}", fmt(total), f"Dari {fmt(len(base))} total record", BLUE),
-    kpi("Ticket Closed", fmt(len(closed)), f"Close Rate: {pct(close_rate, 2)}", CYAN),
-    kpi("Ticket Masih Open", fmt(len(open_)), f"Avg Aging: {days(open_['_aging'].mean())} hari", PINK),
-    kpi("Overall MTTR", f"{days(mttr)} d", f"Dari {fmt(len(closed))} tiket CLOSE", YELLOW),
-    kpi("Top TLP Volume", top_tlp[0], f"{fmt(top_tlp[1])} TT ({pct(top_tlp[1] / max(total, 1) * 100)})",
-        PURPLE, True),
-    kpi(f"Top {cfg['cause_label']}", top_cause[0],
-        f"{fmt(top_cause[1])} TT ({pct(top_cause[1] / max(total, 1) * 100)})", TEAL, True),
-]) + "</div>", unsafe_allow_html=True)
+st.markdown("<div class='kpis'>" + "".join(
+    kpi_html(lbl, val, sub, KPI_COLORS[i], i >= 4) for i, (lbl, val, sub) in enumerate(KPI_LIST)
+) + "</div>", unsafe_allow_html=True)
 
 if d.empty:
     st.warning("Tidak ada data untuk kombinasi filter ini. Klik **Reset Filter** untuk mengembalikan.")
     st.stop()
 
 
-# ---------- executive insight ----------
+# =====================================================================================
+# Executive insight
+# =====================================================================================
 
 def insights(d: pd.DataFrame) -> list[tuple[str, str, str]]:
     n = max(len(d), 1)
-    reg = d["_region"].value_counts()
-    r_top = reg.head(2)
-    open_tlp = d[d["_status"] == "Open"]["_tlp"].value_counts().head(2)
-    open_txt = (" (terbanyak di " + " & ".join(f"<b>{esc(k)}</b> {fmt(v)} TT" for k, v in open_tlp.items()) + ")"
-                if len(open_tlp) else "")
+    r_top = d["_region"].value_counts().head(2)
+    open_toco = d[d["_status"] == "Open"]["_toco"].value_counts().head(2)
+    open_txt = (" (terbanyak di " + " & ".join(f"<b>{esc(k)}</b> {fmt(v)} TT" for k, v in open_toco.items()) + ")"
+                if len(open_toco) else "")
     p1 = (" & ".join(f"Region <b>{esc(k)} ({fmt(v)} TT)</b>" for k, v in r_top.items())
-          + f" menyumbang <b>{pct(r_top.sum() / n * 100)}</b> dari total tiket {esc(cat)}. "
+          + f" menyumbang <b>{pct(r_top.sum() / n * 100)}</b> dari total tiket. "
           f"Saat ini tersisa <b>{fmt((d['_status'] == 'Open').sum())} tiket OPEN</b>{open_txt}.")
 
     cl = d[d["_status"] == "Closed"]
-    g = cl.groupby("_tlp")["_aging"].agg(["mean", "size"]).sort_values("size", ascending=False).head(4)
+    g = cl.groupby("_toco")["_aging"].agg(["mean", "size"]).dropna().sort_values("size", ascending=False).head(4)
     avg = cl["_aging"].mean()
     if len(g):
         fast = g["mean"].idxmin()
@@ -647,37 +1140,97 @@ def insights(d: pd.DataFrame) -> list[tuple[str, str, str]]:
     else:
         p2 = "Belum ada tiket CLOSE pada filter ini."
 
-    tv = d["_tlp"].value_counts().head(4)
+    tv = d["_toco"].value_counts().head(4)
     p3 = (f"<b>{len(tv)} TLP teratas</b> (" + ", ".join(f"{esc(k)} {fmt(v)}" for k, v in tv.items())
-          + f") mendominasi <b>{pct(tv.sum() / n * 100)}</b> dari seluruh tiket {esc(cat)}.")
+          + f") mendominasi <b>{pct(tv.sum() / n * 100)}</b> dari seluruh tiket.")
 
-    cv = d["_cause"].value_counts().head(3)
-    p4 = (f"{len(cv)} isu teratas — " + ", ".join(f"<b>{esc(k)} ({fmt(v)} TT)</b>" for k, v in cv.items())
-          + f" — menyumbang <b>{pct(cv.sum() / n * 100)}</b> dari seluruh tiket.")
-    return [("📍 Regional & TLP Open/Close", p1, BLUE), ("⏱️ Performa MTTR per TLP", p2, YELLOW),
-            ("🏢 Konsentrasi TLP (Pareto)", p3, CYAN), (f"🔎 {cfg['cause_label']} Dominan", p4, PINK)]
+    roots = d.loc[d["_root"] != "(Kosong)", "_root"].value_counts().head(3)
+    src = roots if len(roots) else d["_cause"].value_counts().head(3)
+    p4 = (f"{len(src)} isu teratas — " + ", ".join(f"<b>{esc(k)} ({fmt(v)} TT)</b>" for k, v in src.items())
+          + f" — menyumbang <b>{pct(src.sum() / max(len(d), 1) * 100)}</b> dari seluruh tiket.")
+    return [("📍 Regional & TLP Open/Close", p1, MAGENTA), ("⏱️ Performa MTTR per TLP", p2, YELLOW),
+            ("🏢 Konsentrasi TLP (Pareto)", p3, TOSCA), ("🔎 Root Cause Dominan", p4, RED)]
 
 
-# ---------- tab navigasi ----------
+# =====================================================================================
+# Tab navigasi
+# =====================================================================================
 
-tabs = st.tabs(["📊 Executive Summary", "📈 Trend A–E", "⏱️ MTTR per TLP", "🏢 Jumlah TT per TLP",
-                f"🔎 {cfg['cause_label']}", f"🗂️ Data Explorer ({fmt(len(d))} TT)"])
+EXPORTS: list[tuple[str, go.Figure]] = []
+tabs = st.tabs(["📊 Executive Summary", "📈 Trend A–E", "⏱️ MTTR", "🏢 Jumlah TT", "🔎 Root Cause",
+                f"🗂️ Data Explorer ({fmt(len(d))} TT)"])
 
+# ---------- Executive Summary ----------
 with tabs[0]:
     st.markdown("<div class='insights'>" + "".join(
         f"<div class='ins' style='--c:{c}'><h4>{esc(t)}</h4><p>{body}</p></div>" for t, body, c in insights(d))
         + "</div>", unsafe_allow_html=True)
-    a, b = st.columns(2)
-    with a:
-        chart_card("oc_region", "PVT-1", BLUE, "Open vs Close Ticket per Region", open_close_region(d))
-    with b:
-        chart_card("mttr_tlp", "PVT-2", YELLOW, "Average MTTR (Days) per TLP · Status CLOSE", mttr_by(d, "_tlp"))
-    a, b = st.columns(2)
-    with a:
-        chart_card("monthly", "PVT-3", CYAN, "Jumlah TT per Bulan Open (Close/Open)", monthly_status(d))
-    with b:
-        chart_card("cause", "PVT-4", PINK, f"Top {cfg['cause_label']}", ranked(d, "_cause", 10, PINK))
 
+    # Impact service & stolen memakai data Access Issue / Stolen dengan filter dimensi yang sama
+    # (status Open+Closed sesuai rumus pivot), apa pun kategori yang dipilih.
+    access_f = apply_filters(prepared["Access Issue"], FILTERS, status=False) if "Access Issue" in prepared \
+        else pd.DataFrame(columns=base.columns)
+    stolen_f = apply_filters(prepared["Stolen"], FILTERS, status=False) if "Stolen" in prepared \
+        else pd.DataFrame(columns=base.columns)
+    imp_t = impact_table(access_f, stolen_f, SOW)
+
+    section("Impact Service & SoW per ToCo")
+    tlp_opts = [t for t in imp_t.index if pd.notna(imp_t.loc[t, "SoW (A)"])] or list(imp_t.index)
+    target = st.selectbox("TLP yang dituju (grafik SoW)", tlp_opts, key="target_tlp",
+                          index=tlp_opts.index("TBG") if "TBG" in tlp_opts else 0) if tlp_opts else None
+    a, b = st.columns(2)
+    with a:
+        chart_card("g1", "Grafik 1", MAGENTA, "Impact Service Terbanyak per ToCo (Total TT Released)",
+                   impact_donut(imp_t), EXPORTS)
+    with b:
+        chart_card("g4", "Grafik 4", YELLOW, "The Root Cause · Top 5", root_cause_pie(d), EXPORTS)
+    a, b = st.columns(2)
+    if target is not None:
+        row = imp_t.loc[target]
+        with a:
+            chart_card("g2", "Grafik 2", TOSCA, f"Access Issue Impact Service · {target}",
+                       sow_pie(row["SoW (A)"], row["Total Sites Impact Service (B)"],
+                               "Total Sites Impact Service (B)", TOSCA), EXPORTS)
+            st.caption(f"% (B/A) = **{pct(row['% (B/A)'], 2)}** · SoW (A) {fmt(row['SoW (A)'])} site · "
+                       f"{fmt(row['Total TT Impact Service Released'])} TT impact service released")
+        with b:
+            chart_card("g3", "Grafik 3", RED, f"Stolen Issue · {target}",
+                       sow_pie(row["SoW (A)"], row["Total Sites Stolen"], "Total Sites Stolen", RED), EXPORTS)
+            st.caption(f"% Stolen / SoW = **{pct(row['% Stolen / SoW'], 2)}** · "
+                       f"{fmt(row['Total TT Stolen'])} TT stolen")
+
+    with st.expander("📋 Tabel Impact Service & SoW per ToCo (SoW bisa disunting)"):
+        st.caption("SoW (A) dibaca dari sheet *performance access* bila ada; selebihnya nilai cadangan. "
+                   "Ubah angka di kolom SoW lalu klik **Simpan SoW** — berlaku untuk semua pengguna.")
+        edit = imp_t.reset_index()
+        edited = st.data_editor(
+            edit, hide_index=True, width="stretch", key="sow_editor",
+            disabled=[c for c in edit.columns if c != "SoW (A)"],
+            column_config={"SoW (A)": st.column_config.NumberColumn(format="%d", min_value=0),
+                           "MTTR Average (Days)": st.column_config.NumberColumn(format="%.2f"),
+                           "% (B/A)": st.column_config.NumberColumn(format="%.2f%%"),
+                           "% Stolen / SoW": st.column_config.NumberColumn(format="%.2f%%")})
+        if st.button("💾 Simpan SoW"):
+            new = {r["ToCo"]: float(r["SoW (A)"]) for _, r in edited.iterrows() if pd.notna(r["SoW (A)"])}
+            changed = {k: v for k, v in new.items() if SOW.get(k) != v}
+            save_sow_override({**load_sow_override(), **changed})
+            st.toast(f"SoW tersimpan ({len(changed)} ToCo diubah).")
+            st.rerun()
+
+    section("Open/Close & MTTR")
+    a, b = st.columns(2)
+    with a:
+        chart_card("oc_region", "PVT-1", MAGENTA, "Open vs Close Ticket per Region", open_close_region(d), EXPORTS)
+    with b:
+        chart_card("mttr_tlp", "PVT-2", YELLOW, "Average MTTR (Days) per TLP · Status CLOSE",
+                   mttr_by(d, "_toco"), EXPORTS)
+    a, b = st.columns(2)
+    with a:
+        chart_card("monthly", "PVT-3", TOSCA, "Jumlah TT per Bulan Open (Close/Open)", monthly_status(d), EXPORTS)
+    with b:
+        chart_card("cause", "PVT-4", RED, "Top Cause", ranked(d, "_cause", 10, MAGENTA), EXPORTS)
+
+# ---------- Trend A–E ----------
 with tabs[1]:
     months_sel = sorted(dim["_period"].unique())
     labels_m = [p.strftime("%b_%Y") for p in months_sel]
@@ -686,48 +1239,93 @@ with tabs[1]:
                                         value=(labels_m[max(0, len(labels_m) - 13)], labels_m[-1]), key="ae_range")
         win = months_sel[labels_m.index(m_from): labels_m.index(m_to) + 1]
         t = backlog_summary(dim[dim["_period"].between(win[0], win[-1])], win)
-        chart_card("ae", "A–E", BLUE, f"Trend TT {cat} · {m_from} – {m_to}", summary_chart(t))
-        chart_card("progress", "%", GREEN, f"Progress & Remaining TT {cat}", progress_chart(t))
+        chart_card("ae", "A–E", MAGENTA, f"Trend TT {cat_title} · {m_from} – {m_to}", summary_chart(t), EXPORTS)
+        chart_card("progress", "%", TOSCA, f"Progress & Remaining TT {cat_title}", progress_chart(t), EXPORTS)
         with st.expander("Tabel summary A–E"):
             st.dataframe(t.rename(columns={k: v[0] for k, v in SERIES.items()}), width="stretch",
                          column_config={"Progress (%)": st.column_config.NumberColumn(format="%.1f%%"),
                                         "Remaining (%)": st.column_config.NumberColumn(format="%.1f%%")})
         st.caption("Grafik A–E mengikuti filter di atas kecuali Status & Bulan; TT Cancel tidak dihitung.")
+    else:
+        st.info("Tidak ada data bulan untuk filter ini.")
 
+# ---------- MTTR ----------
 with tabs[2]:
-    chart_card("mttr_tlp2", "PVT-2", YELLOW, "Average MTTR (Days) per TLP", mttr_by(d, "_tlp", 15, 400))
+    chart_card("mttr_tlp2", "MTTR", YELLOW, "Average MTTR (Days) per TLP", mttr_by(d, "_toco", 15, 400))
     a, b = st.columns(2)
     with a:
         chart_card("mttr_region", "MTTR", ORANGE, "Average MTTR (Days) per Region", mttr_by(d, "_region"))
     with b:
-        chart_card("mttr_cause", "MTTR", PINK, f"Average MTTR (Days) per {cfg['cause_label']}",
-                   mttr_by(d, "_cause"))
+        chart_card("mttr_cause", "MTTR", MAGENTA, "Average MTTR (Days) per Cause", mttr_by(d, "_cause"))
 
+# ---------- Jumlah TT ----------
 with tabs[3]:
-    chart_card("pareto", "PVT-3", PURPLE, "Jumlah TT per TLP (Pareto)", pareto(d, "_tlp"))
+    chart_card("pareto", "PVT-3", PURPLE, "Jumlah TT per TLP (Pareto)", pareto(d, "_toco"), EXPORTS)
     a, b = st.columns(2)
     with a:
-        chart_card("tlp_open", "OPEN", PINK, "TT masih OPEN per TLP",
-                   ranked(d[d["_status"] == "Open"], "_tlp", 10, PINK))
+        chart_card("tlp_open", "OPEN", MAGENTA, "TT masih OPEN per TLP",
+                   ranked(d[d["_status"] == "Open"], "_toco", 10, MAGENTA))
     with b:
-        chart_card("tlp_sev", "SEV", CYAN, "Jumlah TT per Severity", ranked(d, "_sev", 8, CYAN, 300))
+        chart_card("tlp_sev", "SEV", TOSCA, "Jumlah TT per Severity", ranked(d, "_sev", 8, TOSCA, 300))
 
+# ---------- Root Cause ----------
 with tabs[4]:
     a, b = st.columns(2)
     with a:
-        chart_card("cause2", "PVT-4", TEAL, f"Top {cfg['cause_label']}", ranked(d, "_cause", 12, TEAL, 420))
+        chart_card("root_pie", "TOP 5", YELLOW, "The Root Cause · Top 5 (header case)", root_cause_pie(d, 440))
     with b:
-        chart_card("cause_pareto", "PVT-4", PURPLE, f"Pareto {cfg['cause_label']}", pareto(d, "_cause", 12))
-    if cfg.get("cause_rules"):
-        st.caption(f"{cfg['cause_label']} dikelompokkan otomatis dari kolom **{cfg['cause']}** (teks bebas) "
-                   "berdasarkan kata kunci; yang tidak cocok masuk *Lainnya*.")
+        roots = d.loc[d["_root"] != "(Kosong)", "_root"].value_counts()
+        tbl = roots.rename("Total").to_frame()
+        tbl.index.name = "The Root Cause"
+        with st.container(key="card_root_table"):
+            st.markdown("<div class='ctitle'><span class='badge' style='--c:#FFD100'>TABEL</span>"
+                        "The Root Cause</div>", unsafe_allow_html=True)
+            st.dataframe(tbl, width="stretch", height=400)
+            blank = int((d["_root"] == "(Kosong)").sum())
+            if blank:
+                st.caption(f"{fmt(blank)} TT tidak memiliki isian root cause (kolom header case kosong).")
+    a, b = st.columns(2)
+    with a:
+        chart_card("cause2", "CAUSE", TOSCA, "Top Cause", ranked(d, "_cause", 12, TOSCA, 420))
+    with b:
+        chart_card("cause_pareto", "CAUSE", PURPLE, "Pareto Cause", pareto(d, "_cause", 12))
+    st.caption("Root cause Access Issue diambil dari kolom header **Case** (atau *Header Case* / *Root Cause* bila "
+               "ada). Stolen & TT CME dikelompokkan otomatis dari teks bebas berdasarkan kata kunci.")
 
+# ---------- Data Explorer ----------
 with tabs[5]:
-    default_cols = [c for c in (cfg["site"] + [REGION_COL, cfg["tlp"], cfg["status"], cfg["month"], cfg["aging"],
-                                               cfg["severity"]]) if c in d.columns]
-    cols = st.multiselect("Kolom ditampilkan", export_cols, default=list(dict.fromkeys(default_cols)))
+    preferred = []
+    for c in cats:
+        cfg = CATEGORIES[c]
+        preferred += cfg["search"] + [REGION_COL, *cfg["toco"], cfg["status"], cfg["month"], cfg["aging"],
+                                      cfg["severity"]]
+    default_cols = [c for c in dict.fromkeys(preferred) if c in export_cols]
+    cols = st.multiselect("Kolom ditampilkan", export_cols, default=default_cols)
     shown = d[cols].copy()
     for c in shown.columns:
         if shown[c].dtype == object:
             shown[c] = shown[c].astype("string")
     st.dataframe(shown, hide_index=True, width="stretch", height=560)
+
+
+# =====================================================================================
+# Export PowerPoint (grafik dikumpulkan saat dirender di atas)
+# =====================================================================================
+
+ppt_sig = f"{current_sig}|{filter_desc}|{st.session_state.get('target_tlp')}|{st.session_state.get('ae_range')}"
+if st.session_state.get("pptx_sig") != ppt_sig:
+    st.session_state.pop("pptx_bytes", None)
+if "pptx_bytes" in st.session_state:
+    ppt_slot.download_button("⬇️ Unduh PPT", st.session_state["pptx_bytes"],
+                             file_name=f"TLP_Escalation_{datetime.now():%Y%m%d_%H%M}.pptx",
+                             mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                             type="primary", width="stretch")
+elif ppt_slot.button("📑 Export PPT", width="stretch", help="Susun presentasi dari grafik pada filter saat ini"):
+    try:
+        with st.spinner(f"Mengonversi {len(EXPORTS)} grafik ke gambar (kaleido)…"):
+            st.session_state["pptx_bytes"] = build_pptx(
+                EXPORTS, source_meta, [(lbl, val, sub) for lbl, val, sub in KPI_LIST], filter_desc)
+            st.session_state["pptx_sig"] = ppt_sig
+        st.rerun()
+    except Exception as exc:  # kaleido/Chrome tidak tersedia, dll.
+        st.error(f"Gagal membuat PowerPoint: {exc}. Pastikan paket `kaleido` terpasang dan Google Chrome tersedia.")
