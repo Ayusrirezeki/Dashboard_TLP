@@ -820,16 +820,8 @@ HOVER_GROUP = ("<b>%{x}</b><br>Count Huawei TT: %{customdata[0]:,}<br>Sum Aging:
                "<extra></extra>")
 
 
-def tt_group(access: pd.DataFrame, height: int = 360) -> go.Figure:
-    """Grafik 1 dari 2: Total TT (Count of Huawei TT) per grup ToCo."""
-    g = mttr_table(access)
-    if g.empty:
-        return empty_fig("Belum ada TT impact service pada filter ini.", height)
-    return _group_bar(g, "tt", MAGENTA, fmt, None, "", "Count Huawei TT", HOVER_GROUP, height)
-
-
 def mttr_group(access: pd.DataFrame, height: int = 360) -> go.Figure:
-    """Grafik 2 dari 2: MTTR = Count of Huawei TT ÷ Sum Aging Time (Days) per grup ToCo."""
+    """MTTR = Count of Huawei TT ÷ Sum Aging Time (Days) per grup ToCo."""
     g = mttr_table(access)
     if g["mttr"].dropna().empty:
         return empty_fig("Belum ada TT impact service pada filter ini.", height)
@@ -1374,13 +1366,8 @@ with tabs[1]:
 
 # ---------- MTTR ----------
 with tabs[2]:
-    a, b = st.columns(2)
-    with a:
-        chart_card("tt_group", "TT", MAGENTA, "Total TT per ToCo · Count of Huawei TT", tt_group(access_f, 400),
-                   EXPORTS)
-    with b:
-        chart_card("mttr_tlp2", "MTTR", YELLOW, "MTTR per ToCo · Count Huawei TT ÷ Sum Aging (Days)",
-                   mttr_group(access_f, 400))
+    chart_card("mttr_tlp2", "MTTR", YELLOW, "MTTR per ToCo · Count Huawei TT ÷ Sum Aging (Days)",
+               mttr_group(access_f, 400))
     with st.expander("Tabel MTTR per ToCo"):
         mt = mttr_table(access_f).rename(columns={"tt": "Count of Huawei TT", "aging": "Sum of Aging Time (Days)",
                                                   "mttr": "MTTR (TT ÷ Aging)"})
