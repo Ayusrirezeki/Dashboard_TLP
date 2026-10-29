@@ -1673,8 +1673,8 @@ elif ppt_slot.button("📑 Export PPT", width="stretch", help="Susun presentasi 
         st.rerun()
     except Exception as exc:  # data grafik tidak valid, dll.
         st.error(f"Gagal membuat PowerPoint: {exc}")
-    
- hide_st_style = """
+   
+hide_st_style = """
 <style>
 #MainMenu {visibility: hidden;}
 header {visibility: hidden;}
