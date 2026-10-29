@@ -9,7 +9,8 @@ Fitur:
     pie SoW vs sites stolen, dan pie top 5 root cause (header case).
   * Upload data mingguan bersama: file disimpan ke `shared_data/latest_tlp_data.xlsb`,
     log pengunggah di `shared_data/upload_log.json`; semua pengguna ter-refresh otomatis.
-  * Export PowerPoint (python-pptx + kaleido) dengan grafik resolusi tinggi.
+  * Export Excel (tabel angka tiap grafik) dan PowerPoint berisi grafik native yang bisa diedit
+    (python-pptx, tanpa perlu Google Chrome).
 
 Aturan Impact Service (sama dengan rumus COUNTIFS di Excel):
   Site Status (kolom ke-2) = "Down" dan Case Status ∈ {Open, Closed}.
@@ -803,7 +804,7 @@ def _group_bar(g: pd.DataFrame, col: str, color: str, fmt_fn, avg: float | None,
                y_title: str, hover: str, height: int) -> go.Figure:
     s = g[col].dropna()
     fig = go.Figure(go.Bar(
-        x=[wrap(i) for i in s.index], y=s.values, marker_color=color, text=[fmt_fn(v) for v in s.values],
+        x=[wrap(i) for i in s.index], y=s.values, marker_color=color, name=y_title, text=[fmt_fn(v) for v in s.values],
         textposition="outside", textfont=dict(size=11, color=TEXT_2), cliponaxis=False,
         customdata=list(zip(g.loc[s.index, "tt"], g.loc[s.index, "aging"])), hovertemplate=hover))
     if avg is not None and pd.notna(avg):
@@ -837,7 +838,7 @@ def ranked(d: pd.DataFrame, col: str, top: int = 10, color: str = TOSCA, height:
         return empty_fig("Tidak ada data.", height)
     share = vc / max(len(d), 1) * 100
     fig = go.Figure(go.Bar(
-        y=vc.index, x=vc.values, orientation="h", marker_color=color,
+        y=vc.index, x=vc.values, orientation="h", marker_color=color, name="Jumlah TT",
         text=[f"{fmt(v)}  ({pct(s)})" for v, s in zip(vc.values, share)], textposition="outside",
         textfont=dict(size=11, color=TEXT_2), cliponaxis=False,
         hovertemplate="<b>%{y}</b><br>%{x:,} TT<extra></extra>"))
@@ -893,9 +894,60 @@ def monthly_status(d: pd.DataFrame) -> go.Figure:
     return fig
 
 
-def chart_card(key: str, badge: str, color: str, title: str, fig, exports: list | None = None) -> None:
+def _clean_label(v) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", str(v))).strip()
+
+
+def fig_export(fig: go.Figure) -> dict | None:
+    """Ambil angka grafik Plotly (bar, garis, pie) jadi spesifikasi data untuk Excel & grafik PPT native."""
+    traces = [t for t in fig.data if t.type in ("bar", "scatter", "pie") and t.hoverinfo != "skip"]
+    if not traces:
+        return None
+    pie = next((t for t in traces if t.type == "pie"), None)
+    if pie is not None:
+        colors = list(pie.marker.colors) if pie.marker.colors is not None else None
+        return dict(kind="doughnut" if (pie.hole or 0) > 0 else "pie",
+                    categories=[_clean_label(x) for x in pie.labels],
+                    series=[dict(name="Jumlah", values=[float(v) for v in pie.values], color=None, colors=colors,
+                                 chart=True)], pct=False)
+    horiz = getattr(traces[0], "orientation", None) == "h"
+    cat_of = (lambda t: t.y) if horiz else (lambda t: t.x)
+    val_of = (lambda t: t.x) if horiz else (lambda t: t.y)
+    cats = [_clean_label(c) for c in cat_of(traces[0])]
+    series = []
+    for t in traces:
+        if t.type == "scatter" and (t.mode or "") == "text":
+            continue
+        lookup = dict(zip([_clean_label(c) for c in cat_of(t)], list(val_of(t))))
+        vals = [None if lookup.get(c) is None or pd.isna(lookup.get(c)) else float(lookup[c]) for c in cats]
+        color = t.marker.color if t.type == "bar" else t.line.color
+        many = isinstance(color, (list, tuple))
+        series.append(dict(name=t.name or "Nilai", values=vals[::-1] if horiz else vals,
+                           color=None if many else color, colors=(list(color)[::-1] if horiz else list(color))
+                           if many else None,
+                           # garis kumulatif % (skala lain) hanya masuk tabel, tidak digambar di PPT
+                           chart="kumulatif" not in (t.name or "").lower()))
+    kind = ("bar_h" if horiz else "column_stacked_100" if fig.layout.barnorm == "percent"
+            else "column_stacked" if fig.layout.barmode == "stack" else "column_clustered")
+    return dict(kind=kind, categories=cats[::-1] if horiz else cats, series=series,
+                pct=fig.layout.yaxis.ticksuffix == "%")
+
+
+def spec_table(spec: dict) -> pd.DataFrame:
+    df = pd.DataFrame({s_["name"]: s_["values"] for s_ in spec["series"]}, index=spec["categories"])
+    df.index.name = "Kategori"
+    if spec["kind"] in ("pie", "doughnut"):
+        total = df.iloc[:, 0].sum()
+        df["%"] = (df.iloc[:, 0] / total * 100).round(2) if total else None
+    return df
+
+
+def chart_card(key: str, badge: str, color: str, title: str, fig, exports: list | None = None,
+               table: pd.DataFrame | None = None, pie_labels: str = "value_percent") -> None:
     """Kartu grafik. `fig` boleh berupa fungsi: dipanggil di dalam kartu, sehingga widget
-    pengatur (mis. dropdown) bisa tampil di antara judul dan grafik."""
+    pengatur (mis. dropdown) bisa tampil di antara judul dan grafik.
+    Bila `exports` diberikan, angka grafik disimpan untuk Export Excel & PPT; `table` mengganti
+    tabel Excel bawaan bila perlu kolom yang lebih jelas."""
     with st.container(key=f"card_{key}"):
         st.markdown(f"<div class='ctitle'><span class='badge' style='--c:{color}'>{esc(badge)}</span>"
                     f"{esc(title)}</div>", unsafe_allow_html=True)
@@ -904,7 +956,10 @@ def chart_card(key: str, badge: str, color: str, title: str, fig, exports: list 
         st.plotly_chart(fig, width="stretch", config={"displaylogo": False, "displayModeBar": False},
                         key=f"fig_{key}")
     if exports is not None:
-        exports.append((title, fig))
+        spec = fig_export(fig)
+        if spec is not None:
+            spec["pie_labels"] = pie_labels
+            exports.append(dict(title=title, spec=spec, table=table if table is not None else spec_table(spec)))
 
 
 def section(title: str) -> None:
@@ -915,8 +970,90 @@ def section(title: str) -> None:
 # Export PowerPoint
 # =====================================================================================
 
-def build_pptx(figures: list[tuple[str, go.Figure]], meta: dict, kpis: list[tuple[str, str, str]],
-               filter_desc: str) -> bytes:
+def _num_format(values, pct_: bool) -> str:
+    if pct_:
+        return '0.0"%"'
+    vals = [v for v in values if v is not None]
+    return "#,##0" if all(float(v).is_integer() for v in vals) else "#,##0.00"
+
+
+def _add_native_chart(slide, x, y, w, h, spec: dict) -> None:
+    """Grafik PowerPoint asli (bisa diedit di PowerPoint) dari spesifikasi fig_export."""
+    from pptx.chart.data import CategoryChartData
+    from pptx.dml.color import RGBColor
+    from pptx.enum.chart import XL_CHART_TYPE, XL_LABEL_POSITION, XL_LEGEND_POSITION
+    from pptx.util import Pt
+
+    def rgb(h_: str):
+        return RGBColor.from_string(str(h_).lstrip("#")[:6])
+
+    kinds = {"pie": XL_CHART_TYPE.PIE, "doughnut": XL_CHART_TYPE.DOUGHNUT, "bar_h": XL_CHART_TYPE.BAR_CLUSTERED,
+             "column_clustered": XL_CHART_TYPE.COLUMN_CLUSTERED, "column_stacked": XL_CHART_TYPE.COLUMN_STACKED,
+             "column_stacked_100": XL_CHART_TYPE.COLUMN_STACKED_100}
+    drawn = [s_ for s_ in spec["series"] if s_["chart"]]
+    cd = CategoryChartData()
+    cd.categories = spec["categories"]
+    for s_ in drawn:
+        cd.add_series(s_["name"], s_["values"], number_format=_num_format(s_["values"], spec.get("pct")))
+    chart = slide.shapes.add_chart(kinds[spec["kind"]], x, y, w, h, cd).chart
+    chart.font.size, chart.font.name = Pt(11), "Segoe UI"
+    chart.font.color.rgb = rgb(TEXT_2)
+    chart.has_title = False  # judul sudah ada di slide; cegah judul otomatis dari nama seri
+    is_pie = spec["kind"] in ("pie", "doughnut")
+    chart.has_legend = is_pie or len(drawn) > 1
+    if chart.has_legend:
+        chart.legend.position = XL_LEGEND_POSITION.BOTTOM
+        chart.legend.include_in_layout = False
+        chart.legend.font.size = Pt(11)
+    plot = chart.plots[0]
+    plot.has_data_labels = True
+    dl = plot.data_labels
+    dl.font.size = Pt(10)
+    if is_pie:
+        # Label ditulis sendiri ("1.390; 51,2%") agar format angka sama dengan dashboard.
+        colors = drawn[0]["colors"] or PALETTE
+        vals = [v or 0 for v in drawn[0]["values"]]
+        total = sum(vals) or 1
+        for i, point in enumerate(plot.series[0].points):
+            color = colors[i % len(colors)]
+            point.format.fill.solid()
+            point.format.fill.fore_color.rgb = rgb(color)
+            share = pct(vals[i] / total * 100, 1)
+            label = share if spec.get("pie_labels") == "percent" else f"{fmt(vals[i])}; {share}"
+            tf = point.data_label.text_frame
+            tf.text = label
+            run = tf.paragraphs[0].runs[0]
+            run.font.size, run.font.bold = Pt(12), True
+            run.font.color.rgb = rgb(TEXT if color in (YELLOW, ORANGE) else "#FFFFFF")
+            # Posisi label hanya untuk pie; doughnut tidak mendukung dLblPos (file jadi rusak bila diisi).
+            if spec["kind"] == "pie":
+                small = vals[i] / total <= 0.06
+                point.data_label.position = XL_LABEL_POSITION.OUTSIDE_END if small else XL_LABEL_POSITION.CENTER
+                if small:
+                    run.font.color.rgb = rgb(TEXT)
+        return
+    dl.number_format = _num_format([v for s_ in drawn for v in s_["values"]], spec.get("pct"))
+    dl.number_format_is_linked = False
+    if spec["kind"] in ("bar_h", "column_clustered"):
+        dl.position = XL_LABEL_POSITION.OUTSIDE_END
+    plot.gap_width = 60
+    for i, (ser, s_) in enumerate(zip(plot.series, drawn)):
+        ser.format.fill.solid()
+        ser.format.fill.fore_color.rgb = rgb(s_["color"] or PALETTE[i % len(PALETTE)])
+        if s_["colors"]:
+            for j, point in enumerate(ser.points):
+                point.format.fill.solid()
+                point.format.fill.fore_color.rgb = rgb(s_["colors"][j % len(s_["colors"])])
+    if spec["kind"] == "bar_h":
+        chart.category_axis.reverse_order = True  # nilai terbesar di atas
+    va = chart.value_axis
+    va.has_major_gridlines = True
+    va.major_gridlines.format.line.color.rgb = rgb("#E3E5EE")
+    va.tick_labels.font.size = Pt(10)
+    chart.category_axis.tick_labels.font.size = Pt(10)
+
+
+def build_pptx(items: list[dict], meta: dict, kpis: list[tuple[str, str, str]], filter_desc: str) -> bytes:
     from pptx import Presentation
     from pptx.dml.color import RGBColor
     from pptx.enum.shapes import MSO_SHAPE
@@ -986,19 +1123,50 @@ def build_pptx(figures: list[tuple[str, go.Figure]], meta: dict, kpis: list[tupl
         text(s, x + Inches(0.25), y + Inches(0.65), card_w - Inches(0.5), Inches(0.9), value, 30, color, True)
         text(s, x + Inches(0.25), y + Inches(1.55), card_w - Inches(0.5), Inches(0.5), sub, 12, MUTED)
 
-    # 3+. Satu grafik per slide (PNG resolusi tinggi via kaleido)
-    for title, fig in figures:
+    # 3+. Satu grafik per slide — grafik PowerPoint asli (tidak butuh Chrome/kaleido, bisa diedit).
+    for item in items:
         s = prs.slides.add_slide(blank)
         background(s)
-        text(s, Inches(0.6), Inches(0.3), Inches(12), Inches(0.7), title, 22, TEXT, True)
-        f = go.Figure(fig)
-        f.update_layout(paper_bgcolor=BG, plot_bgcolor=BG, height=None, width=None)
-        # Kanvas lebih kecil + skala besar = teks & label tetap terbaca saat gambar dibentangkan di slide.
-        png = f.to_image(format="png", width=1150, height=552, scale=3)
-        s.shapes.add_picture(io.BytesIO(png), Inches(0.5), Inches(1.15), width=W - Inches(1.0))
+        text(s, Inches(0.6), Inches(0.3), Inches(12), Inches(0.7), item["title"], 22, TEXT, True)
+        _add_native_chart(s, Inches(0.6), Inches(1.15), W - Inches(1.2), H - Inches(1.6), item["spec"])
 
     buf = io.BytesIO()
     prs.save(buf)
+    return buf.getvalue()
+
+
+def build_excel(items: list[dict], extras: dict[str, pd.DataFrame], meta: dict, filter_desc: str) -> bytes:
+    """Satu sheet per grafik berisi tabel angka grafik, ditambah tabel perhitungan pendukung."""
+    buf = io.BytesIO()
+    used: set[str] = set()
+
+    def sheet_name(title: str) -> str:
+        base = re.sub(r"[\[\]:*?/\\]", " ", title).strip()[:28] or "Sheet"
+        name, i = base, 2
+        while name.lower() in used:
+            name, i = f"{base[:25]} ({i})", i + 1
+        used.add(name.lower())
+        return name
+
+    with pd.ExcelWriter(buf, engine="xlsxwriter") as xw:
+        wb = xw.book
+        title_fmt = wb.add_format({"bold": True, "font_size": 13, "font_color": MAGENTA})
+        info = pd.DataFrame({"Keterangan": ["Laporan", "Data diunggah oleh", "Update data terakhir", "File data",
+                                            "Filter", "Dibuat"],
+                             "Nilai": ["TLP Dashboard", meta.get("uploader", "-"), meta.get("timestamp", "-"),
+                                       meta.get("filename", "-"), filter_desc, f"{datetime.now():%d-%m-%Y %H:%M}"]})
+        info.to_excel(xw, sheet_name=sheet_name("Info"), index=False)
+        xw.sheets["Info"].set_column(0, 0, 22)
+        xw.sheets["Info"].set_column(1, 1, 90)
+        for title, table in [(it["title"], it["table"]) for it in items] + list(extras.items()):
+            name = sheet_name(title)
+            table.to_excel(xw, sheet_name=name, startrow=2)
+            ws = xw.sheets[name]
+            ws.write(0, 0, title, title_fmt)
+            idx_w = max([len(str(table.index.name or ""))] + [len(str(v)) for v in table.index]) + 2
+            ws.set_column(0, 0, min(max(idx_w, 12), 60))
+            for j, col in enumerate(table.columns, start=1):
+                ws.set_column(j, j, min(max(len(str(col)) + 2, 12), 40))
     return buf.getvalue()
 
 
@@ -1047,7 +1215,7 @@ with head_r:
             "4. Sheet wajib: **List Access Issue**, **List Stolen**, **TT CME** (header di baris pertama).\n"
             "   SoW (A) dibaca dari sheet **performance access** bila ada.\n\n"
             "Grafik A–E: TT berstatus *Cancel* tidak dihitung (sama dengan pivot Summary).")
-    csv_slot = b3.empty()
+    xlsx_slot = b3.empty()
     ppt_slot = b4.empty()
     if b5.button("↻ Reset Filter", width="stretch"):
         for k in [k for k in st.session_state if str(k).startswith(FILTER_KEYS) or k in ("ae_range", "target_tlp", "g1_owner", "g4_owner")]:
@@ -1159,9 +1327,6 @@ if FILTERS["q"]:
 filter_desc = " · ".join(filter_parts)
 
 export_cols = [c for c in d.columns if not c.startswith("_")]
-csv_slot.download_button("⬇️ Export CSV", d[export_cols].to_csv(index=False).encode("utf-8-sig"),
-                         file_name=f"TLP_{'_'.join(c.replace(' ', '') for c in cats)}_{datetime.now():%Y%m%d_%H%M}.csv",
-                         mime="text/csv", width="stretch")
 
 
 # =====================================================================================
@@ -1247,7 +1412,8 @@ def insights(d: pd.DataFrame) -> list[tuple[str, str, str]]:
 # Tab navigasi
 # =====================================================================================
 
-EXPORTS: list[tuple[str, go.Figure]] = []
+EXPORTS: list[dict] = []                # angka tiap grafik (untuk Export Excel & PPT)
+EXTRA_TABLES: dict[str, pd.DataFrame] = {}  # tabel perhitungan pendukung (hanya Excel)
 tabs = st.tabs(["📊 Executive Summary", "📈 Trend A–E", "⏱️ MTTR", "🏢 Jumlah TT", "🔎 Root Cause",
                 f"🗂️ Data Explorer ({fmt(len(d))} TT)"])
 
@@ -1305,15 +1471,27 @@ with tabs[0]:
         with a:
             chart_card("g2", "Grafik 2", TOSCA, f"Access Issue Impact Service · {target}",
                        sow_pie(row["SoW (A)"], row["Total Sites Impact Service (B)"],
-                               "Total Sites Impact Service (B)", TOSCA), EXPORTS)
+                               "Total Sites Impact Service (B)", TOSCA), EXPORTS,
+                       table=pd.DataFrame({"Nilai": [row["SoW (A)"], row["Total Sites Impact Service (B)"],
+                                                     row["Total TT Impact Service Released"], row["% (B/A)"]]},
+                                          index=pd.Index(["SoW (A)", "Total Sites Impact Service (B)",
+                                                          "Total TT Impact Service Released", "% (B/A)"],
+                                                         name=target)),
+                       pie_labels="percent")
             st.caption(f"% (B/A) = **{pct(row['% (B/A)'], 2)}** · SoW (A) {fmt(row['SoW (A)'])} site · "
                        f"{fmt(row['Total TT Impact Service Released'])} TT impact service released")
         with b:
             chart_card("g3", "Grafik 3", RED, f"Stolen Issue · {target}",
-                       sow_pie(row["SoW (A)"], row["Total Sites Stolen"], "Total Sites Stolen", TOSCA), EXPORTS)
+                       sow_pie(row["SoW (A)"], row["Total Sites Stolen"], "Total Sites Stolen", TOSCA), EXPORTS,
+                       table=pd.DataFrame({"Nilai": [row["SoW (A)"], row["Total Sites Stolen"], row["Total TT Stolen"],
+                                                     row["% Stolen / SoW"]]},
+                                          index=pd.Index(["SoW (A)", "Total Sites Stolen", "Total TT Stolen",
+                                                          "% Stolen / SoW"], name=target)),
+                       pie_labels="percent")
             st.caption(f"% Stolen / SoW = **{pct(row['% Stolen / SoW'], 2)}** · "
                        f"{fmt(row['Total TT Stolen'])} TT stolen")
 
+    EXTRA_TABLES["Impact Service & SoW per ToCo"] = imp_t
     with st.expander("📋 Tabel Impact Service & SoW per ToCo (SoW bisa disunting)"):
         st.caption("SoW (A) dibaca dari sheet *performance access* bila ada; selebihnya nilai cadangan. "
                    "Ubah angka di kolom SoW lalu klik **Simpan SoW** — berlaku untuk semua pengguna.")
@@ -1337,8 +1515,11 @@ with tabs[0]:
     with a:
         chart_card("oc_region", "PVT-1", MAGENTA, "Open vs Close Ticket per Region", open_close_region(d), EXPORTS)
     with b:
+        mt_export = mttr_table(access_f).rename(columns={"tt": "Count of Huawei TT",
+                                                         "aging": "Sum of Aging Time (Days)", "mttr": "MTTR (TT ÷ Aging)"})
+        mt_export.index.name = "ToCo"
         chart_card("mttr_tlp", "PVT-2", YELLOW, "MTTR per ToCo · Count Huawei TT ÷ Sum Aging (Days)",
-                   mttr_group(access_f), EXPORTS)
+                   mttr_group(access_f), EXPORTS, table=mt_export)
     a, b = st.columns(2)
     with a:
         chart_card("monthly", "PVT-3", TOSCA, "Jumlah TT per Bulan Open (Close/Open)", monthly_status(d), EXPORTS)
@@ -1354,8 +1535,10 @@ with tabs[1]:
                                         value=(labels_m[max(0, len(labels_m) - 13)], labels_m[-1]), key="ae_range")
         win = months_sel[labels_m.index(m_from): labels_m.index(m_to) + 1]
         t = backlog_summary(dim[dim["_period"].between(win[0], win[-1])], win)
-        chart_card("ae", "A–E", MAGENTA, f"Trend TT {cat_title} · {m_from} – {m_to}", summary_chart(t), EXPORTS)
-        chart_card("progress", "%", TOSCA, f"Progress & Remaining TT {cat_title}", progress_chart(t), EXPORTS)
+        chart_card("ae", "A–E", MAGENTA, f"Trend TT {cat_title} · {m_from} – {m_to}", summary_chart(t), EXPORTS,
+                   table=t.rename(columns={k: v[0] for k, v in SERIES.items()}))
+        chart_card("progress", "%", TOSCA, f"Progress & Remaining TT {cat_title}", progress_chart(t), EXPORTS,
+                   table=t[["Progress (%)", "Remaining (%)"]])
         with st.expander("Tabel summary A–E"):
             st.dataframe(t.rename(columns={k: v[0] for k, v in SERIES.items()}), width="stretch",
                          column_config={"Progress (%)": st.column_config.NumberColumn(format="%.1f%%"),
@@ -1403,7 +1586,9 @@ with tabs[3]:
             rows = [(t, int(k1[t])) for t in order]
             rows += [("TOTAL", int(k1.sum())), ("TLP/MO OTHERS", others),
                      ("Total Actual (All Site)", int(k1.sum()) + others)]
-            st.dataframe(pd.DataFrame(rows, columns=["TLP", "Total site K1"]), hide_index=True, width="stretch")
+            k1_df = pd.DataFrame(rows, columns=["TLP", "Total site K1"])
+            EXTRA_TABLES["Total site K1 per TLP"] = k1_df.set_index("TLP")
+            st.dataframe(k1_df, hide_index=True, width="stretch")
             st.caption("Total site K1 = COUNTIFS(LIST SITE!Owner, TLP). Kolom status PM (NY PM / Done PM) belum "
                        "ada di sheet LIST SITE, sehingga Achievement PM belum bisa dihitung.")
     a, b = st.columns(2)
@@ -1422,6 +1607,7 @@ with tabs[4]:
         roots = access_rc.loc[access_rc["_root"] != "(Kosong)", "_root"].value_counts()
         tbl = roots.rename("Total").to_frame()
         tbl.index.name = "The Root Cause"
+        EXTRA_TABLES["The Root Cause (kolom Case)"] = tbl
         with st.container(key="card_root_table"):
             st.markdown("<div class='ctitle'><span class='badge' style='--c:#B88A00'>TABEL</span>"
                         "The Root Cause</div>", unsafe_allow_html=True)
@@ -1457,7 +1643,14 @@ with tabs[5]:
 # Export PowerPoint (grafik dikumpulkan saat dirender di atas)
 # =====================================================================================
 
-ppt_sig = f"{current_sig}|{filter_desc}|{st.session_state.get('target_tlp')}|{st.session_state.get('ae_range')}"
+xlsx_slot.download_button(
+    "📊 Export Excel", build_excel(EXPORTS, EXTRA_TABLES, source_meta, filter_desc),
+    file_name=f"TLP_Dashboard_Data_{datetime.now():%Y%m%d_%H%M}.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", width="stretch",
+    help="Tabel angka perhitungan setiap grafik (satu sheet per grafik) sesuai filter saat ini")
+
+ppt_sig = "|".join(str(x) for x in [current_sig, filter_desc] + [st.session_state.get(k) for k in
+                                    ("target_tlp", "ae_range", "g1_owner", "g4_owner")])
 if st.session_state.get("pptx_sig") != ppt_sig:
     st.session_state.pop("pptx_bytes", None)
 if "pptx_bytes" in st.session_state:
@@ -1467,10 +1660,10 @@ if "pptx_bytes" in st.session_state:
                              type="primary", width="stretch")
 elif ppt_slot.button("📑 Export PPT", width="stretch", help="Susun presentasi dari grafik pada filter saat ini"):
     try:
-        with st.spinner(f"Mengonversi {len(EXPORTS)} grafik ke gambar (kaleido)…"):
+        with st.spinner(f"Menyusun {len(EXPORTS)} grafik ke PowerPoint…"):
             st.session_state["pptx_bytes"] = build_pptx(
                 EXPORTS, source_meta, [(lbl, val, sub) for lbl, val, sub in KPI_LIST], filter_desc)
             st.session_state["pptx_sig"] = ppt_sig
         st.rerun()
-    except Exception as exc:  # kaleido/Chrome tidak tersedia, dll.
-        st.error(f"Gagal membuat PowerPoint: {exc}. Pastikan paket `kaleido` terpasang dan Google Chrome tersedia.")
+    except Exception as exc:  # data grafik tidak valid, dll.
+        st.error(f"Gagal membuat PowerPoint: {exc}")
