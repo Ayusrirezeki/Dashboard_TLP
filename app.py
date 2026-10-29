@@ -107,8 +107,22 @@ st.markdown(f"""
                       border-radius:16px; padding:10px 16px 4px 16px; box-shadow:0 8px 24px rgba(0,0,0,.25);}}
   [data-testid="stWidgetLabel"] p {{text-transform:uppercase; font-size:.68rem !important; font-weight:700;
                                    letter-spacing:.06em; color:{MUTED} !important;}}
-  [data-baseweb="select"] > div, .stTextInput input {{background:rgba(8,20,48,.9) !important;
+  [data-baseweb="select"] > div {{background:rgba(8,20,48,.9) !important;
                                    border-color:rgba(96,140,230,.35) !important;}}
+                                   
+  /* Kotak input Pencarian (Site / Issue) diubah jadi Putih */
+  .st-key-filterbar [data-baseweb="input"] input, 
+  .stTextInput input {{
+      background-color: #ffffff !important;
+      color: #000000 !important;
+      -webkit-text-fill-color: #000000 !important;
+      border-color: rgba(96,140,230,.35) !important;
+  }}
+  .stTextInput input::placeholder {{
+      color: #666666 !important;
+      -webkit-text-fill-color: #666666 !important;
+  }}
+
   .st-key-filterbar [data-baseweb="select"] div, .st-key-filterbar input {{font-size:.8rem !important;}}
   .st-key-filterbar [data-baseweb="select"] > div {{padding-left:2px;}}
   .st-key-filterbar [data-testid="stColumn"] {{min-width:0;}}
