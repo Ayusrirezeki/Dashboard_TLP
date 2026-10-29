@@ -1,4 +1,4 @@
-"""TLP Escalation Dashboard — Access Issue, Stolen, dan TT CME.
+"""TLP Dashboard — Access Issue, Stolen, dan TT CME.
 
 Fitur:
   * Membaca file .xlsb (sheet `List Access Issue`, `List Stolen`, `TT CME`) dengan pyxlsb.
@@ -27,7 +27,7 @@ from __future__ import annotations
 import streamlit as st
 
 # set_page_config harus menjadi perintah Streamlit pertama dan hanya dipanggil sekali.
-st.set_page_config(page_title="TLP Escalation Dashboard", page_icon="📊", layout="wide",
+st.set_page_config(page_title="TLP Dashboard", page_icon="📊", layout="wide",
                    initial_sidebar_state="collapsed")
 
 import html  # noqa: E402
@@ -116,10 +116,15 @@ TOCO_RULES = [
     ("MSN", r"\bmsn\b|menara selular"),
     ("MASSADA", r"massada"),
     ("WINET", r"winet|wireless network"),
+    ("MATRINDO", r"matrindo"),
+    ("BALCOM", r"balcom"),
     ("STP", r"\bstp\b|solusi tunas"),
     ("IOH", r"^ioh$|indosat"),
 ]
 # SoW (A) cadangan (dari dokumen referensi) bila sheet performance tidak memuat ToCo tersebut.
+# Urutan grup ToCo di grafik (mengikuti tabel Total site K1 / ToCO di Excel).
+TOCO_ORDER = ["PTI", "DMT", "TBG", "CMI", "DHOST", "BALI TOWER", "GIHON", "EBT", "EDOTCO", "IBSW", "TRIVIEW",
+              "KIRANA", "GAMETRACO", "MSN", "MASSADA", "WINET", "MATRINDO", "BALCOM"]
 DEFAULT_SOW = {"PTI": 21449, "DMT": 12004, "TBG": 11358, "CMI": 8009, "DHOST": 847, "BALI TOWER": 638,
                "GIHON": 530, "EBT": 269, "EDOTCO": 97, "IBSW": 92, "KIRANA": 46, "TRIVIEW": 42,
                "GAMETRACO": 33, "MSN": 29, "MASSADA": 24, "WINET": 20}
@@ -398,7 +403,7 @@ def _extract_sow(rows: list[list]) -> dict[str, float]:
 
 
 @st.cache_data(show_spinner="Membaca file .xlsb (pyxlsb)…", max_entries=3)
-def load_workbook(signature: str, path: str) -> tuple[dict[str, pd.DataFrame], dict[str, float]]:
+def load_workbook(signature: str, path: str) -> tuple[dict[str, pd.DataFrame], dict[str, float], pd.DataFrame]:
     # `signature` (path + waktu ubah + ukuran) menjadi kunci cache: data baru otomatis dibaca ulang.
     # Workbook dibuka sekali saja: membuka ulang = membaca ulang shared strings (lambat).
     sheets, sow = {}, {}
@@ -410,7 +415,10 @@ def load_workbook(signature: str, path: str) -> tuple[dict[str, pd.DataFrame], d
             if name in wb.sheets:
                 for k, v in _extract_sow(_sheet_rows(wb, name)).items():
                     sow.setdefault(k, v)
-    return sheets, sow
+        # Sheet "LIST SITE" (daftar site per TLP) -> Total site K1 = COUNTIFS(Owner, TLP).
+        list_site = next((n for n in wb.sheets if n.strip().lower().startswith("list site")), None)
+        sites = _rows_to_frame(_sheet_rows(wb, list_site)) if list_site else pd.DataFrame()
+    return sheets, sow, sites
 
 
 # =====================================================================================
@@ -491,6 +499,17 @@ def prepare(signature: str, _df: pd.DataFrame, cat: str) -> pd.DataFrame:
     df["_search"] = (pd.concat([_col(df, c, "") for c in present], axis=1).agg(" ".join, axis=1).str.lower()
                      if present else "")
     return df
+
+
+@st.cache_data(show_spinner=False, max_entries=3)
+def prepare_sites(signature: str, _df: pd.DataFrame) -> pd.DataFrame:
+    """LIST SITE: kolom Owner -> grup ToCo; 'TLP/MO OTHERS' dipisah sebagai OTHERS."""
+    if _df.empty or "Owner" not in _df.columns:
+        return pd.DataFrame(columns=["_owner_raw", "_toco", "_region"])
+    df = pd.DataFrame({"_owner_raw": _col(_df, "Owner"), "_region": _col(_df, "Region")})
+    others = df["_owner_raw"].str.lower().str.contains("other")
+    df["_toco"] = df["_owner_raw"].map(toco_code).where(~others, "OTHERS")
+    return df[df["_owner_raw"] != "(Kosong)"]
 
 
 def apply_filters(df: pd.DataFrame, f: dict, *, status: bool = True, month: bool = True) -> pd.DataFrame:
@@ -766,6 +785,37 @@ def mttr_by(d: pd.DataFrame, col: str, top: int = 12, height: int = 360) -> go.F
     return fig
 
 
+def mttr_table(access: pd.DataFrame) -> pd.DataFrame:
+    """MTTR per grup ToCo seperti kolom 'MTTR Average (Days)' di Excel: jumlah Aging Time (Days)
+    dibagi jumlah TT impact service (Site Status Down, Open/Closed) per grup."""
+    imp = access[access["_impact"] & access["_status"].isin(["Open", "Closed"])]
+    g = imp.groupby("_toco").agg(tt=("_toco", "size"), aging=("_aging", "sum"))
+    g = g.reindex([t for t in TOCO_ORDER if t in g.index])
+    g["mttr"] = g["aging"] / g["tt"].where(g["tt"] > 0)
+    return g.dropna(subset=["mttr"])
+
+
+def mttr_group(access: pd.DataFrame, height: int = 360) -> go.Figure:
+    g = mttr_table(access)
+    if g.empty:
+        return empty_fig("Belum ada TT impact service pada filter ini.", height)
+    avg = g["aging"].sum() / g["tt"].sum()
+    fig = go.Figure(go.Bar(
+        x=[wrap(i) for i in g.index], y=g["mttr"], marker_color=[RED if v > avg else TOSCA for v in g["mttr"]],
+        text=[f"{days(v)} d" for v in g["mttr"]], textposition="outside", textfont=dict(size=11, color=TEXT_2),
+        cliponaxis=False, customdata=list(zip(g["tt"], g["aging"])),
+        hovertemplate="<b>%{x}</b><br>MTTR: %{y:.2f} hari<br>%{customdata[0]:,} TT · Σ aging %{customdata[1]:,.0f} hari"
+                      "<extra></extra>"))
+    fig.add_hline(y=avg, line=dict(color=YELLOW, dash="dash", width=1.5),
+                  annotation_text=f"Rata-rata {days(avg)} d", annotation_position="top right",
+                  annotation_font=dict(color=GOLD, size=11))
+    dark(fig, height, legend_top=False)
+    fig.update_layout(showlegend=False, margin=dict(t=26),
+                      yaxis=dict(range=[0, g["mttr"].max() * 1.22], title="hari"),
+                      xaxis=dict(tickangle=-30 if len(g) > 8 else 0, tickfont=dict(size=10)))
+    return fig
+
+
 def ranked(d: pd.DataFrame, col: str, top: int = 10, color: str = TOSCA, height: int = 360) -> go.Figure:
     vc = d[col].value_counts().head(top)[::-1]
     if vc.empty:
@@ -782,25 +832,26 @@ def ranked(d: pd.DataFrame, col: str, top: int = 10, color: str = TOSCA, height:
     return fig
 
 
-def pareto(d: pd.DataFrame, col: str, top: int = 15) -> go.Figure:
-    vc = d[col].value_counts()
+def pareto(d: pd.DataFrame | None, col: str | None, top: int = 15, values: pd.Series | None = None,
+           name: str = "Jumlah TT") -> go.Figure:
+    vc = values.sort_values(ascending=False) if values is not None else d[col].value_counts()
     if vc.empty:
         return empty_fig("Tidak ada data.", 400)
     cum = vc.cumsum() / vc.sum() * 100
     vc, cum = vc.head(top), cum.head(top)
     labels = [wrap(i) for i in vc.index]
     fig = go.Figure()
-    fig.add_trace(go.Bar(x=labels, y=vc.values, name="Jumlah TT", marker_color=PURPLE, text=bar_text(vc.values),
+    fig.add_trace(go.Bar(x=labels, y=vc.values, name=name, marker_color=PURPLE, text=bar_text(vc.values),
                          textposition="outside", textfont=dict(size=11, color=TEXT_2), cliponaxis=False,
-                         hovertemplate="<b>%{x}</b><br>%{y:,} TT<extra></extra>"))
+                         hovertemplate=f"<b>%{{x}}</b><br>{name}: %{{y:,}}<extra></extra>"))
     fig.add_trace(go.Scatter(x=labels, y=cum.values, name="Kumulatif %", yaxis="y2",
                              mode="lines+markers+text", text=bar_text(cum.values, lambda v: pct(v, 0)),
                              textposition="top center", textfont=dict(size=10, color=GOLD), cliponaxis=False,
                              line=dict(color=YELLOW, width=2), marker=dict(size=7),
                              hovertemplate="<b>%{x}</b><br>Kumulatif: %{y:.1f}%<extra></extra>"))
     dark(fig, 400)
-    fig.update_layout(yaxis=dict(range=[0, vc.max() * 1.6]),
-                      yaxis2=dict(overlaying="y", side="right", range=[-60, 115], showgrid=False,
+    fig.update_layout(yaxis=dict(range=[0, vc.max() * 2.1]),
+                      yaxis2=dict(overlaying="y", side="right", range=[-45, 112], showgrid=False,
                                   tickvals=[0, 50, 100], ticksuffix="%", tickfont=dict(color=GOLD)),
                       xaxis=dict(tickangle=-30 if len(vc) > 8 else 0, tickfont=dict(size=10)))
     return fig
@@ -891,7 +942,7 @@ def build_pptx(figures: list[tuple[str, go.Figure]], meta: dict, kpis: list[tupl
     background(s)
     accent = s.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(0.8), Inches(2.0), Inches(0.12), Inches(2.2))
     accent.fill.solid(); accent.fill.fore_color.rgb = rgb(MAGENTA); accent.line.fill.background()
-    text(s, Inches(1.1), Inches(1.9), Inches(11), Inches(1.0), "TLP Escalation Dashboard", 40, TEXT, True)
+    text(s, Inches(1.1), Inches(1.9), Inches(11), Inches(1.0), "TLP Dashboard", 40, TEXT, True)
     text(s, Inches(1.1), Inches(2.85), Inches(11), Inches(0.6),
          "Laporan Access Issue · Stolen · TT CME", 20, MAGENTA)
     text(s, Inches(1.1), Inches(3.55), Inches(11), Inches(1.2), [
@@ -984,13 +1035,13 @@ with head_r:
     csv_slot = b3.empty()
     ppt_slot = b4.empty()
     if b5.button("↻ Reset Filter", width="stretch"):
-        for k in [k for k in st.session_state if str(k).startswith(FILTER_KEYS) or k in ("ae_range", "target_tlp", "g1_owner")]:
+        for k in [k for k in st.session_state if str(k).startswith(FILTER_KEYS) or k in ("ae_range", "target_tlp", "g1_owner", "g4_owner")]:
             st.session_state.pop(k, None)
         st.rerun()
 
 with head_l:
     pill = f"<span class='pill'>{esc(source_meta.get('filename', ''))}</span>" if source_path else ""
-    st.markdown(f"<div class='hdr'><div class='logo'>TLP</div><div><h1>TLP Escalation Dashboard{pill}</h1>"
+    st.markdown(f"<div class='hdr'><div class='logo'>TLP</div><div><h1>TLP Dashboard{pill}</h1>"
                 f"<div class='sub'>Access Issue · Stolen · TT CME — dibaca dengan pyxlsb</div></div></div>",
                 unsafe_allow_html=True)
 
@@ -1019,7 +1070,7 @@ if source_path is None:
     st.stop()
 
 try:
-    sheets, sow_from_file = load_workbook(current_sig, str(source_path))
+    sheets, sow_from_file, list_site = load_workbook(current_sig, str(source_path))
 except Exception as exc:  # file rusak / bukan xlsb
     st.error(f"Gagal membaca **{source_meta.get('filename')}**: {exc}")
     st.stop()
@@ -1028,7 +1079,10 @@ if not sheets:
     st.stop()
 
 prepared = {cat: prepare(f"{current_sig}:{cat}", df, cat) for cat, df in sheets.items()}
-SOW = {**DEFAULT_SOW, **sow_from_file, **load_sow_override()}
+SITES = prepare_sites(f"{current_sig}:sites", list_site)
+# SoW (A) = Total site K1 dari LIST SITE (bila ada), lalu tabel di sheet performance, lalu nilai cadangan.
+SITE_K1 = SITES[SITES["_toco"] != "OTHERS"].groupby("_toco").size() if len(SITES) else pd.Series(dtype=int)
+SOW = {**DEFAULT_SOW, **sow_from_file, **{k: float(v) for k, v in SITE_K1.items()}, **load_sow_override()}
 
 
 # =====================================================================================
@@ -1210,6 +1264,16 @@ with tabs[0]:
                                   "Top 4 grup dengan Total TT Impact Service Released terbanyak.")
         return impact_donut(impact_by_group(access_f, sel, 4))
 
+    def grafik4() -> go.Figure:
+        owner_vc = access_rc["_owner"].value_counts()
+        owner_vc = owner_vc[owner_vc.index != "(Kosong)"]
+        groups = access_rc.groupby("_owner")["_toco"].agg(lambda g: " / ".join(g.value_counts().index))
+        sel = st.multiselect("Site Owner", list(owner_vc.index), key="g4_owner", placeholder="Semua Site Owner",
+                             format_func=lambda o: f"{o} → {groups.get(o, '-')} ({fmt(owner_vc.get(o))} TT)",
+                             help="Pilih Site Owner untuk melihat Top 5 root cause (kolom Case) miliknya.")
+        src = access_rc[access_rc["_owner"].isin(sel)] if sel else access_rc
+        return root_cause_pie(src, 380)
+
     section("Impact Service & SoW per ToCo")
     tlp_opts = [t for t in imp_t.index if pd.notna(imp_t.loc[t, "SoW (A)"])] or list(imp_t.index)
     target = st.selectbox("TLP yang dituju (grafik SoW)", tlp_opts, key="target_tlp",
@@ -1219,8 +1283,7 @@ with tabs[0]:
         chart_card("g1", "Grafik 1", MAGENTA, "Impact Service Terbanyak per ToCo · Top 4 (Total TT Released)",
                    grafik1, EXPORTS)
     with b:
-        chart_card("g4", "Grafik 4", GOLD, "The Root Cause · Top 5 (kolom Case)", root_cause_pie(access_rc, 448),
-                   EXPORTS)
+        chart_card("g4", "Grafik 4", GOLD, "The Root Cause · Top 5 (kolom Case)", grafik4, EXPORTS)
     a, b = st.columns(2)
     if target is not None:
         row = imp_t.loc[target]
@@ -1232,7 +1295,7 @@ with tabs[0]:
                        f"{fmt(row['Total TT Impact Service Released'])} TT impact service released")
         with b:
             chart_card("g3", "Grafik 3", RED, f"Stolen Issue · {target}",
-                       sow_pie(row["SoW (A)"], row["Total Sites Stolen"], "Total Sites Stolen", RED), EXPORTS)
+                       sow_pie(row["SoW (A)"], row["Total Sites Stolen"], "Total Sites Stolen", TOSCA), EXPORTS)
             st.caption(f"% Stolen / SoW = **{pct(row['% Stolen / SoW'], 2)}** · "
                        f"{fmt(row['Total TT Stolen'])} TT stolen")
 
@@ -1259,13 +1322,13 @@ with tabs[0]:
     with a:
         chart_card("oc_region", "PVT-1", MAGENTA, "Open vs Close Ticket per Region", open_close_region(d), EXPORTS)
     with b:
-        chart_card("mttr_tlp", "PVT-2", YELLOW, "Average MTTR (Days) per TLP · Status CLOSE",
-                   mttr_by(d, "_toco"), EXPORTS)
+        chart_card("mttr_tlp", "PVT-2", YELLOW, "Average MTTR (Days) per ToCo · Σ Aging / Total TT",
+                   mttr_group(access_f), EXPORTS)
     a, b = st.columns(2)
     with a:
         chart_card("monthly", "PVT-3", TOSCA, "Jumlah TT per Bulan Open (Close/Open)", monthly_status(d), EXPORTS)
     with b:
-        chart_card("cause", "PVT-4", RED, "Top Cause", ranked(d, "_cause", 10, MAGENTA), EXPORTS)
+        chart_card("cause", "PVT-4", RED, "Top Cause · Problem Type", ranked(access_rc, "_cause", 10, MAGENTA), EXPORTS)
 
 # ---------- Trend A–E ----------
 with tabs[1]:
@@ -1288,7 +1351,17 @@ with tabs[1]:
 
 # ---------- MTTR ----------
 with tabs[2]:
-    chart_card("mttr_tlp2", "MTTR", YELLOW, "Average MTTR (Days) per TLP", mttr_by(d, "_toco", 15, 400))
+    chart_card("mttr_tlp2", "MTTR", YELLOW, "Average MTTR (Days) per ToCo · Σ Aging / Total TT",
+               mttr_group(access_f, 400))
+    with st.expander("Tabel MTTR per ToCo"):
+        mt = mttr_table(access_f).rename(columns={"tt": "Total TT Impact Service", "aging": "Σ Aging Time (Days)",
+                                                  "mttr": "MTTR Average (Days)"})
+        mt.index.name = "ToCo"
+        st.dataframe(mt, width="stretch", column_config={
+            "Σ Aging Time (Days)": st.column_config.NumberColumn(format="%.1f"),
+            "MTTR Average (Days)": st.column_config.NumberColumn(format="%.2f")})
+    st.caption("MTTR per ToCo = jumlah Aging Time (Days) ÷ jumlah TT impact service (Site Status Down, Case Status "
+               "Open/Closed) per grup ToCo — sama dengan kolom MTTR Average (Days) di tabel Excel.")
     a, b = st.columns(2)
     with a:
         chart_card("mttr_region", "MTTR", ORANGE, "Average MTTR (Days) per Region", mttr_by(d, "_region"))
@@ -1297,7 +1370,26 @@ with tabs[2]:
 
 # ---------- Jumlah TT ----------
 with tabs[3]:
-    chart_card("pareto", "PVT-3", PURPLE, "Jumlah TT per TLP (Pareto)", pareto(d, "_toco"), EXPORTS)
+    sites_f = SITES
+    if f_region:
+        sites_f = sites_f[sites_f["_region"].isin(f_region)]
+    if f_tlp:
+        sites_f = sites_f[sites_f["_toco"].isin(f_tlp)]
+    k1 = sites_f[sites_f["_toco"] != "OTHERS"].groupby("_toco").size()
+    if k1.empty:
+        st.info("Sheet **LIST SITE** tidak ditemukan / kosong — grafik Total site K1 tidak bisa dihitung.")
+    else:
+        chart_card("pareto", "PVT-3", PURPLE, "Jumlah Site per TLP · Total site K1 (sheet LIST SITE)",
+                   pareto(None, None, 20, values=k1, name="Total site K1"), EXPORTS)
+        with st.expander("Tabel Total site K1 per TLP"):
+            order = [t for t in TOCO_ORDER if t in k1.index] + [t for t in k1.index if t not in TOCO_ORDER]
+            others = int((sites_f["_toco"] == "OTHERS").sum())
+            rows = [(t, int(k1[t])) for t in order]
+            rows += [("TOTAL", int(k1.sum())), ("TLP/MO OTHERS", others),
+                     ("Total Actual (All Site)", int(k1.sum()) + others)]
+            st.dataframe(pd.DataFrame(rows, columns=["TLP", "Total site K1"]), hide_index=True, width="stretch")
+            st.caption("Total site K1 = COUNTIFS(LIST SITE!Owner, TLP). Kolom status PM (NY PM / Done PM) belum "
+                       "ada di sheet LIST SITE, sehingga Achievement PM belum bisa dihitung.")
     a, b = st.columns(2)
     with a:
         chart_card("tlp_open", "OPEN", MAGENTA, "TT masih OPEN per TLP",
@@ -1323,11 +1415,11 @@ with tabs[4]:
                 st.caption(f"{fmt(blank)} TT tidak memiliki isian root cause (kolom Case kosong).")
     a, b = st.columns(2)
     with a:
-        chart_card("cause2", "CAUSE", TOSCA, "Top Cause", ranked(d, "_cause", 12, TOSCA, 420))
+        chart_card("cause2", "CAUSE", TOSCA, "Top Cause · Problem Type", ranked(access_rc, "_cause", 12, TOSCA, 420))
     with b:
-        chart_card("cause_pareto", "CAUSE", PURPLE, "Pareto Cause", pareto(d, "_cause", 12))
+        chart_card("cause_pareto", "CAUSE", PURPLE, "Pareto Cause · Problem Type", pareto(access_rc, "_cause", 12))
     st.caption("The Root Cause diambil dari kolom **Case** di sheet List Access Issue (mengikuti semua filter). "
-               "Top Cause: Problem Type untuk Access Issue; Stolen & TT CME dikelompokkan otomatis dari teks.")
+               "Top Cause & Pareto Cause dihitung dari kolom **Problem Type** di sheet List Access Issue.")
 
 # ---------- Data Explorer ----------
 with tabs[5]:
@@ -1354,7 +1446,7 @@ if st.session_state.get("pptx_sig") != ppt_sig:
     st.session_state.pop("pptx_bytes", None)
 if "pptx_bytes" in st.session_state:
     ppt_slot.download_button("⬇️ Unduh PPT", st.session_state["pptx_bytes"],
-                             file_name=f"TLP_Escalation_{datetime.now():%Y%m%d_%H%M}.pptx",
+                             file_name=f"TLP_Dashboard_{datetime.now():%Y%m%d_%H%M}.pptx",
                              mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
                              type="primary", width="stretch")
 elif ppt_slot.button("📑 Export PPT", width="stretch", help="Susun presentasi dari grafik pada filter saat ini"):
