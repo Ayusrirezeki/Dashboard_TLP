@@ -2,3 +2,6 @@ streamlit>=1.50
 pandas>=2.2
 plotly>=6.0
 pyxlsb>=1.0
+openpyxl
+python-pptx
+kaleido
