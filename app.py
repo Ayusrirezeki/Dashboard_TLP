@@ -55,6 +55,7 @@ LOCK_FILE = SHARED_DIR / "upload.lock"
 SOW_FILE = SHARED_DIR / "sow_override.json"
 LOCK_TIMEOUT_S = 180       # lock unggahan dianggap basi setelah 3 menit
 REFRESH_EVERY = "15s"      # interval cek data baru untuk auto-refresh semua pengguna
+PREP_VERSION = 2           # naikkan bila kolom turunan di prepare() berubah, agar cache lama tidak dipakai
 
 # Warna khas Indosat di atas latar gelap.
 MAGENTA, YELLOW, RED, TOSCA = "#E20074", "#FFD100", "#ED1C24", "#00A3AD"
@@ -136,7 +137,7 @@ CATEGORIES = {
         toco=["GROUP1", "GROUP"], owner="Site Owner", cause="Problem Type", root=["Case"],
         severity="Severity", aging="Aging Time (Days)", year="Year Open", site_id="Site ID",
         impact=[f"{SITE_STATUS}_1", SITE_STATUS],
-        search=["Site ID", "Site ID IOH", "Site Name", "Remarks from FLM", "Case"], icon="🚧"),
+        search=["Site ID", "Site ID IOH", "Site Name", "Remarks from FLM", "Case"], tt="Huawei TT", icon="🚧"),
     "Stolen": dict(
         sheet="List Stolen", month="Month Open", status="Status TT ToCo/OpCo", toco=["Toco Group Name"],
         owner="Toco Owner",
@@ -493,6 +494,8 @@ def prepare(signature: str, _df: pd.DataFrame, cat: str) -> pd.DataFrame:
     df["_backlog"] = _col(df, cfg.get("backlog"), "Normal TT")
     df["_month"] = df["_period"].dt.strftime("%b_%Y")
     df["_site"] = _col(df, cfg["site_id"], "")
+    # Baris yang punya nomor TT (mis. "Count of Huawei TT" di pivot); tanpa kolom TT, semua baris dihitung.
+    df["_has_tt"] = _col(df, cfg.get("tt"), "").ne("") if cfg.get("tt") in df.columns else True
     impact_col = _first(df, cfg["impact"])
     df["_impact"] = _col(df, impact_col, "").str.lower().eq("down") if impact_col else False
     present = [c for c in cfg["search"] if c in df.columns]
@@ -786,34 +789,54 @@ def mttr_by(d: pd.DataFrame, col: str, top: int = 12, height: int = 360) -> go.F
 
 
 def mttr_table(access: pd.DataFrame) -> pd.DataFrame:
-    """MTTR per grup ToCo seperti kolom 'MTTR Average (Days)' di Excel: jumlah Aging Time (Days)
-    dibagi jumlah TT impact service (Site Status Down, Open/Closed) per grup."""
+    """Per grup ToCo (impact service: Site Status Down, Case Status Open/Closed):
+    tt   = Count of Huawei TT, aging = Sum Aging Time (Days), mttr = tt ÷ aging."""
     imp = access[access["_impact"] & access["_status"].isin(["Open", "Closed"])]
-    g = imp.groupby("_toco").agg(tt=("_toco", "size"), aging=("_aging", "sum"))
+    g = imp.groupby("_toco").agg(tt=("_has_tt", "sum"), aging=("_aging", "sum"))
     g = g.reindex([t for t in TOCO_ORDER if t in g.index])
-    g["mttr"] = g["aging"] / g["tt"].where(g["tt"] > 0)
-    return g.dropna(subset=["mttr"])
+    g = g[g["tt"] > 0]
+    g["mttr"] = g["tt"] / g["aging"].where(g["aging"] > 0)  # aging 0 -> tidak bisa dibagi (kosong)
+    return g
 
 
-def mttr_group(access: pd.DataFrame, height: int = 360) -> go.Figure:
+def _group_bar(g: pd.DataFrame, col: str, color: str, fmt_fn, avg: float | None, avg_label: str,
+               y_title: str, hover: str, height: int) -> go.Figure:
+    s = g[col].dropna()
+    fig = go.Figure(go.Bar(
+        x=[wrap(i) for i in s.index], y=s.values, marker_color=color, text=[fmt_fn(v) for v in s.values],
+        textposition="outside", textfont=dict(size=11, color=TEXT_2), cliponaxis=False,
+        customdata=list(zip(g.loc[s.index, "tt"], g.loc[s.index, "aging"])), hovertemplate=hover))
+    if avg is not None and pd.notna(avg):
+        fig.add_hline(y=avg, line=dict(color=YELLOW, dash="dash", width=1.5), annotation_text=avg_label,
+                      annotation_position="top right", annotation_font=dict(color=GOLD, size=11))
+    dark(fig, height, legend_top=False)
+    fig.update_layout(showlegend=False, margin=dict(t=26),
+                      yaxis=dict(range=[0, (s.max() if len(s) else 1) * 1.22], title=y_title),
+                      xaxis=dict(tickangle=-30 if len(s) > 8 else 0, tickfont=dict(size=10)))
+    return fig
+
+
+HOVER_GROUP = ("<b>%{x}</b><br>Count Huawei TT: %{customdata[0]:,}<br>Sum Aging: %{customdata[1]:,.1f} hari"
+               "<extra></extra>")
+
+
+def tt_group(access: pd.DataFrame, height: int = 360) -> go.Figure:
+    """Grafik 1 dari 2: Total TT (Count of Huawei TT) per grup ToCo."""
     g = mttr_table(access)
     if g.empty:
         return empty_fig("Belum ada TT impact service pada filter ini.", height)
-    avg = g["aging"].sum() / g["tt"].sum()
-    fig = go.Figure(go.Bar(
-        x=[wrap(i) for i in g.index], y=g["mttr"], marker_color=[RED if v > avg else TOSCA for v in g["mttr"]],
-        text=[f"{days(v)} d" for v in g["mttr"]], textposition="outside", textfont=dict(size=11, color=TEXT_2),
-        cliponaxis=False, customdata=list(zip(g["tt"], g["aging"])),
-        hovertemplate="<b>%{x}</b><br>MTTR: %{y:.2f} hari<br>%{customdata[0]:,} TT · Σ aging %{customdata[1]:,.0f} hari"
-                      "<extra></extra>"))
-    fig.add_hline(y=avg, line=dict(color=YELLOW, dash="dash", width=1.5),
-                  annotation_text=f"Rata-rata {days(avg)} d", annotation_position="top right",
-                  annotation_font=dict(color=GOLD, size=11))
-    dark(fig, height, legend_top=False)
-    fig.update_layout(showlegend=False, margin=dict(t=26),
-                      yaxis=dict(range=[0, g["mttr"].max() * 1.22], title="hari"),
-                      xaxis=dict(tickangle=-30 if len(g) > 8 else 0, tickfont=dict(size=10)))
-    return fig
+    return _group_bar(g, "tt", MAGENTA, fmt, None, "", "Count Huawei TT", HOVER_GROUP, height)
+
+
+def mttr_group(access: pd.DataFrame, height: int = 360) -> go.Figure:
+    """Grafik 2 dari 2: MTTR = Count of Huawei TT ÷ Sum Aging Time (Days) per grup ToCo."""
+    g = mttr_table(access)
+    if g["mttr"].dropna().empty:
+        return empty_fig("Belum ada TT impact service pada filter ini.", height)
+    avg = g["tt"].sum() / g["aging"].sum() if g["aging"].sum() > 0 else None
+    return _group_bar(g, "mttr", TOSCA, lambda v: days(v), avg, f"Total {days(avg)}" if avg else "",
+                      "TT ÷ Aging", "<b>%{x}</b><br>MTTR (TT ÷ Aging): %{y:.2f}<br>"
+                      + HOVER_GROUP.split("<br>", 1)[1], height)
 
 
 def ranked(d: pd.DataFrame, col: str, top: int = 10, color: str = TOSCA, height: int = 360) -> go.Figure:
@@ -1078,7 +1101,7 @@ if not sheets:
     st.error("Sheet List Access Issue / List Stolen / TT CME tidak ditemukan di file ini.")
     st.stop()
 
-prepared = {cat: prepare(f"{current_sig}:{cat}", df, cat) for cat, df in sheets.items()}
+prepared = {cat: prepare(f"{current_sig}:{cat}:v{PREP_VERSION}", df, cat) for cat, df in sheets.items()}
 SITES = prepare_sites(f"{current_sig}:sites", list_site)
 # SoW (A) = Total site K1 dari LIST SITE (bila ada), lalu tabel di sheet performance, lalu nilai cadangan.
 SITE_K1 = SITES[SITES["_toco"] != "OTHERS"].groupby("_toco").size() if len(SITES) else pd.Series(dtype=int)
@@ -1322,7 +1345,7 @@ with tabs[0]:
     with a:
         chart_card("oc_region", "PVT-1", MAGENTA, "Open vs Close Ticket per Region", open_close_region(d), EXPORTS)
     with b:
-        chart_card("mttr_tlp", "PVT-2", YELLOW, "Average MTTR (Days) per ToCo · Σ Aging / Total TT",
+        chart_card("mttr_tlp", "PVT-2", YELLOW, "MTTR per ToCo · Count Huawei TT ÷ Sum Aging (Days)",
                    mttr_group(access_f), EXPORTS)
     a, b = st.columns(2)
     with a:
@@ -1351,17 +1374,23 @@ with tabs[1]:
 
 # ---------- MTTR ----------
 with tabs[2]:
-    chart_card("mttr_tlp2", "MTTR", YELLOW, "Average MTTR (Days) per ToCo · Σ Aging / Total TT",
-               mttr_group(access_f, 400))
+    a, b = st.columns(2)
+    with a:
+        chart_card("tt_group", "TT", MAGENTA, "Total TT per ToCo · Count of Huawei TT", tt_group(access_f, 400),
+                   EXPORTS)
+    with b:
+        chart_card("mttr_tlp2", "MTTR", YELLOW, "MTTR per ToCo · Count Huawei TT ÷ Sum Aging (Days)",
+                   mttr_group(access_f, 400))
     with st.expander("Tabel MTTR per ToCo"):
-        mt = mttr_table(access_f).rename(columns={"tt": "Total TT Impact Service", "aging": "Σ Aging Time (Days)",
-                                                  "mttr": "MTTR Average (Days)"})
+        mt = mttr_table(access_f).rename(columns={"tt": "Count of Huawei TT", "aging": "Sum of Aging Time (Days)",
+                                                  "mttr": "MTTR (TT ÷ Aging)"})
         mt.index.name = "ToCo"
         st.dataframe(mt, width="stretch", column_config={
-            "Σ Aging Time (Days)": st.column_config.NumberColumn(format="%.1f"),
-            "MTTR Average (Days)": st.column_config.NumberColumn(format="%.2f")})
-    st.caption("MTTR per ToCo = jumlah Aging Time (Days) ÷ jumlah TT impact service (Site Status Down, Case Status "
-               "Open/Closed) per grup ToCo — sama dengan kolom MTTR Average (Days) di tabel Excel.")
+            "Sum of Aging Time (Days)": st.column_config.NumberColumn(format="%.1f"),
+            "MTTR (TT ÷ Aging)": st.column_config.NumberColumn(format="%.2f")})
+    st.caption("Per grup ToCo (TT impact service: Site Status Down, Case Status Open/Closed): Total TT = Count of "
+               "Huawei TT; MTTR = Count of Huawei TT ÷ Sum of Aging Time (Days). Grup dengan Sum Aging 0 "
+               "tidak bisa dibagi sehingga tidak tampil di grafik MTTR.")
     a, b = st.columns(2)
     with a:
         chart_card("mttr_region", "MTTR", ORANGE, "Average MTTR (Days) per Region", mttr_by(d, "_region"))
