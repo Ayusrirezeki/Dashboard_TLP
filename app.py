@@ -56,7 +56,7 @@ LOCK_FILE = SHARED_DIR / "upload.lock"
 SOW_FILE = SHARED_DIR / "sow_override.json"
 LOCK_TIMEOUT_S = 180       # lock unggahan dianggap basi setelah 3 menit
 REFRESH_EVERY = "15s"      # interval cek data baru untuk auto-refresh semua pengguna
-PREP_VERSION = 2           # naikkan bila kolom turunan di prepare() berubah, agar cache lama tidak dipakai
+PREP_VERSION = 3           # naikkan bila kolom turunan di prepare() berubah, agar cache lama tidak dipakai
 
 # Warna khas Indosat di atas latar gelap.
 MAGENTA, YELLOW, RED, TOSCA = "#E20074", "#FFD100", "#ED1C24", "#00A3AD"
@@ -383,7 +383,7 @@ def _rows_to_frame(rows: list[list]) -> pd.DataFrame:
     header = [_clean_name(v, i, seen) for i, v in enumerate(rows[0])]
     width = len(header)
     body = [(r + [None] * width)[:width] for r in rows[1:]]
-    return pd.DataFrame(body, columns=header).dropna(how="all")
+    return pd.DataFrame(body, columns=header).dropna(how="all").dropna(axis=1, how="all")
 
 
 def _extract_sow(rows: list[list]) -> dict[str, float]:
@@ -404,9 +404,7 @@ def _extract_sow(rows: list[list]) -> dict[str, float]:
     return out
 
 
-@st.cache_data(show_spinner="Membaca file .xlsb (pyxlsb)…", max_entries=3)
-def load_workbook(signature: str, path: str) -> tuple[dict[str, pd.DataFrame], dict[str, float], pd.DataFrame]:
-    # `signature` (path + waktu ubah + ukuran) menjadi kunci cache: data baru otomatis dibaca ulang.
+def load_workbook(path: str) -> tuple[dict[str, pd.DataFrame], dict[str, float], pd.DataFrame]:
     # Workbook dibuka sekali saja: membuka ulang = membaca ulang shared strings (lambat).
     sheets, sow = {}, {}
     with open_workbook(path) as wb:
@@ -469,10 +467,10 @@ def _clean_root(s: pd.Series) -> pd.Series:
     return s.where(s.isin(["(Kosong)"]), s.str.slice(0, 1).str.upper() + s.str.slice(1))
 
 
-@st.cache_data(show_spinner=False, max_entries=6)
-def prepare(signature: str, _df: pd.DataFrame, cat: str) -> pd.DataFrame:
+def prepare(_df: pd.DataFrame, cat: str) -> pd.DataFrame:
+    """Tambah kolom turunan (_status, _toco, _impact, ...). `_df` dipakai langsung (tanpa salinan)."""
     cfg = CATEGORIES[cat]
-    df = _df.copy()
+    df = _df
     df["_period"] = to_period(df[cfg["month"]]) if cfg["month"] in df.columns else pd.NaT
     df = df[df["_period"].notna()].copy()
     status = _col(df, cfg["status"], "").str.lower()
@@ -505,8 +503,7 @@ def prepare(signature: str, _df: pd.DataFrame, cat: str) -> pd.DataFrame:
     return df
 
 
-@st.cache_data(show_spinner=False, max_entries=3)
-def prepare_sites(signature: str, _df: pd.DataFrame) -> pd.DataFrame:
+def prepare_sites(_df: pd.DataFrame) -> pd.DataFrame:
     """LIST SITE: kolom Owner -> grup ToCo; 'TLP/MO OTHERS' dipisah sebagai OTHERS."""
     if _df.empty or "Owner" not in _df.columns:
         return pd.DataFrame(columns=["_owner_raw", "_toco", "_region"])
@@ -514,6 +511,17 @@ def prepare_sites(signature: str, _df: pd.DataFrame) -> pd.DataFrame:
     others = df["_owner_raw"].str.lower().str.contains("other")
     df["_toco"] = df["_owner_raw"].map(toco_code).where(~others, "OTHERS")
     return df[df["_owner_raw"] != "(Kosong)"]
+
+
+@st.cache_resource(show_spinner="Membaca file .xlsb (pyxlsb)…", max_entries=1)
+def load_data(signature: str, path: str) -> tuple[dict[str, pd.DataFrame], dict[str, float], pd.DataFrame]:
+    """Baca + siapkan data sekali per versi file. st.cache_resource membagi objek yang sama ke semua
+    pengguna tanpa menyalin (hemat memori — penting di Streamlit Community Cloud yang dibatasi ±1 GB).
+    `signature` (path + waktu ubah + ukuran + versi) menjadi kunci: data baru otomatis dibaca ulang dan
+    versi lama dibuang (max_entries=1). Jangan mengubah DataFrame hasil fungsi ini di tempat."""
+    sheets, sow, sites = load_workbook(path)
+    prepared = {cat: prepare(sheets.pop(cat), cat) for cat in list(sheets)}
+    return prepared, sow, prepare_sites(sites)
 
 
 def apply_filters(df: pd.DataFrame, f: dict, *, status: bool = True, month: bool = True) -> pd.DataFrame:
@@ -1253,16 +1261,14 @@ if source_path is None:
     st.stop()
 
 try:
-    sheets, sow_from_file, list_site = load_workbook(current_sig, str(source_path))
+    prepared, sow_from_file, SITES = load_data(f"{current_sig}:v{PREP_VERSION}", str(source_path))
 except Exception as exc:  # file rusak / bukan xlsb
     st.error(f"Gagal membaca **{source_meta.get('filename')}**: {exc}")
     st.stop()
-if not sheets:
+if not prepared:
     st.error("Sheet List Access Issue / List Stolen / TT CME tidak ditemukan di file ini.")
     st.stop()
 
-prepared = {cat: prepare(f"{current_sig}:{cat}:v{PREP_VERSION}", df, cat) for cat, df in sheets.items()}
-SITES = prepare_sites(f"{current_sig}:sites", list_site)
 # SoW (A) = Total site K1 dari LIST SITE (bila ada), lalu tabel di sheet performance, lalu nilai cadangan.
 SITE_K1 = SITES[SITES["_toco"] != "OTHERS"].groupby("_toco").size() if len(SITES) else pd.Series(dtype=int)
 SOW = {**DEFAULT_SOW, **sow_from_file, **{k: float(v) for k, v in SITE_K1.items()}, **load_sow_override()}
