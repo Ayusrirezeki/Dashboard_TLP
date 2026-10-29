@@ -1675,13 +1675,13 @@ elif ppt_slot.button("📑 Export PPT", width="stretch", help="Susun presentasi 
         st.error(f"Gagal membuat PowerPoint: {exc}")
     
  hide_st_style = """
-    <style>
-    #MainMenu {visibility: hidden;}
-    header {visibility: hidden;}
-    footer {visibility: hidden;}
-    .viewerBadge_container__1QSob {visibility: hidden;}
-    [data-testid="stStatusWidget"] {visibility: hidden;}
-    #stDecoration {display: none;}
-    </style>
+<style>
+#MainMenu {visibility: hidden;}
+header {visibility: hidden;}
+footer {visibility: hidden;}
+.viewerBadge_container__1QSob {visibility: hidden;}
+[data-testid="stStatusWidget"] {visibility: hidden;}
+#stDecoration {display: none;}
+</style>
 """
 st.markdown(hide_st_style, unsafe_allow_html=True)
