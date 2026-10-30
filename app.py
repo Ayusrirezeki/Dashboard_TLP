@@ -886,11 +886,16 @@ def _labels(vals) -> list[str]:
 
 def sla_area(ct: pd.DataFrame, x: list[str]) -> go.Figure:
     fig = go.Figure()
+    base = pd.Series(0, index=ct.index)
     for name in ["Exceed SLA", "Meet SLA"]:
         fig.add_trace(go.Scatter(
-            x=x, y=ct[name], name=name, mode="lines+text", stackgroup="sla", line=dict(width=0.5, color=SLA_COLORS[name]),
-            fillcolor=SLA_COLORS[name], text=_labels(ct[name]), textposition="middle center",
-            textfont=dict(size=10, color="#ffffff"), hovertemplate=f"<b>%{{x}}</b><br>{name}: %{{y:,}}<extra></extra>"))
+            x=x, y=ct[name], name=name, mode="lines", stackgroup="sla", line=dict(width=0.5, color=SLA_COLORS[name]),
+            fillcolor=SLA_COLORS[name], hovertemplate=f"<b>%{{x}}</b><br>{name}: %{{y:,}}<extra></extra>"))
+        # Label di tengah pita masing-masing (bukan di tepi atas) agar tidak tertimpa label Grand Total.
+        fig.add_trace(go.Scatter(
+            x=x, y=base + ct[name] / 2, mode="text", text=_labels(ct[name]), textposition="middle center",
+            textfont=dict(size=10, color="#ffffff"), showlegend=False, hoverinfo="skip"))
+        base = base + ct[name]
     fig.add_trace(go.Scatter(
         x=x, y=ct["Grand Total"], name="Grand Total", mode="lines+markers+text", text=_labels(ct["Grand Total"]),
         textposition="top center", textfont=dict(size=11, color=TEXT), line=dict(color="#5B8DD6", width=2.5),
