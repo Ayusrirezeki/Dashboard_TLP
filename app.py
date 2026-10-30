@@ -30,96 +30,96 @@ import streamlit as st
 # set_page_config harus menjadi perintah Streamlit pertama dan hanya dipanggil sekali.
 st.set_page_config(page_title="TLP Dashboard", page_icon="📊", layout="wide",
                    initial_sidebar_state="collapsed")
-st.markdown(f"""
-style>
-  .stApp {{background:#ffffff;}}
-  [data-testid="stHeader"] {{background: transparent;}}
-  .block-container {{padding-top: 1.1rem; padding-bottom: 2rem; max-width: 1640px;}}
+st.markdown("""
+<style>
+  .stApp {background:#ffffff;}
+  [data-testid="stHeader"] {background: transparent;}
+  .block-container {padding-top: 1.1rem; padding-bottom: 2rem; max-width: 1640px;}
 
-  /* --- CSS PENYEMBUNYI ELEMEN STREAMLIT TERBARU --- */
-  #MainMenu {{visibility: hidden !important; display: none !important;}}
-  header {{visibility: hidden !important; display: none !important;}}
-  footer {{visibility: hidden !important; display: none !important;}}
-  .stDeployButton {{display: none !important;}}
+  /* --- CSS PENYEMBUNYI ELEMEN STREAMLIT --- */
+  #MainMenu {visibility: hidden !important; display: none !important;}
+  header {visibility: hidden !important; display: none !important;}
+  footer {visibility: hidden !important; display: none !important;}
+  .stDeployButton {display: none !important;}
   
-  /* Menyembunyikan lencana pojok kanan bawah (Viewer Badge / Hosting Badge) */
-  [data-testid="stToolbar"] {{visibility: hidden !important; display: none !important;}}
-  [data-testid="stStatusWidget"] {{visibility: hidden !important; display: none !important;}}
-  div.viewerBadge_container__1QSob {{display: none !important; visibility: hidden !important;}}
-  a[href*="streamlit.cloud"] {{display: none !important;}}
-  div[class*="viewerBadge"] {{display: none !important; visibility: hidden !important;}}
+  [data-testid="stToolbar"] {visibility: hidden !important; display: none !important;}
+  [data-testid="stStatusWidget"] {visibility: hidden !important; display: none !important;}
+  div.viewerBadge_container__1QSob {display: none !important; visibility: hidden !important;}
+  a[href*="streamlit.cloud"] {display: none !important;}
+  div[class*="viewerBadge"] {display: none !important; visibility: hidden !important;}
   
-  div[data-testid="stDecoration"] {{display: none !important;}}
+  div[data-testid="stDecoration"] {display: none !important;}
   /* ----------------------------------------------- */
 
-  .hdr {{display:flex; align-items:center; gap:14px;}}
-  .hdr .logo {{width:48px; height:48px; border-radius:14px; display:flex; align-items:center; justify-content:center;
-              background:conic-gradient(from 210deg, {MAGENTA}, {RED}, {YELLOW}, {TOSCA}, {MAGENTA});
+  .hdr {display:flex; align-items:center; gap:14px;}
+  .hdr .logo {width:48px; height:48px; border-radius:14px; display:flex; align-items:center; justify-content:center;
+              background:conic-gradient(from 210deg, #E20074, #ED1C24, #FFD100, #00A3AD, #E20074);
               color:#fff; font-weight:800; font-size:.78rem; text-shadow:0 1px 3px rgba(0,0,0,.5);
-              box-shadow:0 4px 18px rgba(226,0,116,.45);}}
-  .hdr h1 {{font-size:1.45rem; margin:0; padding:0; color:{TEXT}; font-weight:800; letter-spacing:-.01em;}}
-  .hdr .pill {{display:inline-block; margin-left:10px; padding:2px 10px; border-radius:999px; font-size:.68rem;
-              font-weight:700; color:{MAGENTA}; background:rgba(226,0,116,.07); border:1px solid rgba(226,0,116,.45);
-              vertical-align:middle;}}
-  .hdr .sub {{color:{MUTED}; font-size:.78rem; margin-top:2px;}}
-  .lock {{display:inline-flex; align-items:center; gap:8px; padding:6px 12px; border-radius:10px; font-size:.78rem;
-          color:{TEXT_2}; background:rgba(0,163,173,.12); border:1px solid rgba(0,163,173,.45);}}
-  .lock b {{color:{TEXT};}}
-  .lock .dot {{width:8px; height:8px; border-radius:50%; background:{TOSCA}; box-shadow:0 0 8px {TOSCA};
-               animation: pulse 1.6s infinite;}}
-  @keyframes pulse {{0%,100% {{opacity:1}} 50% {{opacity:.35}}}}
+              box-shadow:0 4px 18px rgba(226,0,116,.45);}
+  .hdr h1 {font-size:1.45rem; margin:0; padding:0; color:#1a1c2e; font-weight:800; letter-spacing:-.01em;}
+  .hdr .pill {display:inline-block; margin-left:10px; padding:2px 10px; border-radius:999px; font-size:.68rem;
+              font-weight:700; color:#E20074; background:rgba(226,0,116,.07); border:1px solid rgba(226,0,116,.45);
+              vertical-align:middle;}
+  .hdr .sub {color:#6b7090; font-size:.78rem; margin-top:2px;}
+  .lock {display:inline-flex; align-items:center; gap:8px; padding:6px 12px; border-radius:10px; font-size:.78rem;
+          color:#3d4058; background:rgba(0,163,173,.12); border:1px solid rgba(0,163,173,.45);}
+  .lock b {color:#1a1c2e;}
+  .lock .dot {width:8px; height:8px; border-radius:50%; background:#00A3AD; box-shadow:0 0 8px #00A3AD;
+               animation: pulse 1.6s infinite;}
+  @keyframes pulse {0%,100% {opacity:1} 50% {opacity:.35}}
 
-  .st-key-filterbar {{background:{CARD}; border:1px solid rgba(226,0,116,.28) !important; border-radius:16px;
-                      padding:10px 16px 4px 16px; box-shadow:{SHADOW};}}
-  [data-testid="stWidgetLabel"] p {{text-transform:uppercase; font-size:.68rem !important; font-weight:700;
-                                   letter-spacing:.06em; color:{MUTED} !important;}}
-  [data-baseweb="select"] > div, .stTextInput input {{background:#ffffff !important;
-                                   border-color:rgba(226,0,116,.32) !important;}}
-  .st-key-filterbar [data-baseweb="select"] div, .st-key-filterbar input {{font-size:.8rem !important;}}
-  .st-key-filterbar [data-baseweb="tag"] {{background:rgba(226,0,116,.85) !important;}}
-  .st-key-filterbar [data-testid="stColumn"] {{min-width:0;}}
+  .st-key-filterbar {background:#ffffff; border:1px solid rgba(226,0,116,.28) !important; border-radius:16px;
+                      padding:10px 16px 4px 16px; box-shadow:0 6px 18px rgba(20,25,60,.07);}
+  [data-testid="stWidgetLabel"] p {text-transform:uppercase; font-size:.68rem !important; font-weight:700;
+                                   letter-spacing:.06em; color:#6b7090 !important;}
+  [data-baseweb="select"] > div, .stTextInput input {background:#ffffff !important;
+                                   border-color:rgba(226,0,116,.32) !important;}
+  .st-key-filterbar [data-baseweb="select"] div, .st-key-filterbar input {font-size:.8rem !important;}
+  .st-key-filterbar [data-baseweb="tag"] {background:rgba(226,0,116,.85) !important;}
+  .st-key-filterbar [data-testid="stColumn"] {min-width:0;}
 
-  .kpis {{display:grid; grid-template-columns:repeat(6, minmax(0,1fr)); gap:14px; margin:14px 0 6px;}}
-  .kpi {{background:{CARD}; border:1px solid {BORDER}; border-top:3px solid var(--c);
-         border-radius:14px; padding:14px 16px 12px; min-height:118px; box-shadow:{SHADOW};}}
-  .kpi .lbl {{font-size:.68rem; font-weight:700; letter-spacing:.06em; text-transform:uppercase; color:{TEXT_2};}}
-  .kpi .val {{font-size:1.9rem; font-weight:800; color:var(--c); line-height:1.25; margin-top:6px;
-              white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}}
-  .kpi .val.txt {{font-size:1.25rem; margin-top:10px;}}
-  .kpi .sub {{font-size:.74rem; color:{MUTED}; margin-top:4px;}}
+  .kpis {display:grid; grid-template-columns:repeat(6, minmax(0,1fr)); gap:14px; margin:14px 0 6px;}
+  .kpi {background:#ffffff; border:1px solid rgba(20,25,60,.10); border-top:3px solid var(--c);
+         border-radius:14px; padding:14px 16px 12px; min-height:118px; box-shadow:0 6px 18px rgba(20,25,60,.07);}
+  .kpi .lbl {font-size:.68rem; font-weight:700; letter-spacing:.06em; text-transform:uppercase; color:#3d4058;}
+  .kpi .val {font-size:1.9rem; font-weight:800; color:var(--c); line-height:1.25; margin-top:6px;
+              white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
+  .kpi .val.txt {font-size:1.25rem; margin-top:10px;}
+  .kpi .sub {font-size:.74rem; color:#6b7090; margin-top:4px;}
 
-  [role="tablist"] {{gap:8px; flex-wrap:wrap; border-bottom:1px solid rgba(226,0,116,.2); padding-bottom:10px;}}
-  [data-testid="stTab"] {{background:#f4f5f9; border:1px solid {BORDER}; border-radius:10px;
-                         padding:6px 14px !important; height:auto; transition:background .15s;}}
-  [data-testid="stTab"] p {{font-size:.86rem; font-weight:600; color:{TEXT_2};}}
-  [data-testid="stTab"]:hover {{background:rgba(226,0,116,.16);}}
-  [data-testid="stTab"][aria-selected="true"] {{background:linear-gradient(135deg,{MAGENTA},#ff3d9a);
-                                               border-color:{MAGENTA}; box-shadow:0 4px 16px rgba(226,0,116,.45);}}
-  [data-testid="stTab"][aria-selected="true"] p {{color:#fff;}}
-  [role="tablist"] > :not([role="tab"]), [data-baseweb="tab-highlight"], [data-baseweb="tab-border"] {{display:none;}}
+  [role="tablist"] {gap:8px; flex-wrap:wrap; border-bottom:1px solid rgba(226,0,116,.2); padding-bottom:10px;}
+  [data-testid="stTab"] {background:#f4f5f9; border:1px solid rgba(20,25,60,.10); border-radius:10px;
+                         padding:6px 14px !important; height:auto; transition:background .15s;}
+  [data-testid="stTab"] p {font-size:.86rem; font-weight:600; color:#3d4058;}
+  [data-testid="stTab"]:hover {background:rgba(226,0,116,.16);}
+  [data-testid="stTab"][aria-selected="true"] {background:linear-gradient(135deg,#E20074,#ff3d9a);
+                                               border-color:#E20074; box-shadow:0 4px 16px rgba(226,0,116,.45);}
+  [data-testid="stTab"][aria-selected="true"] p {color:#fff;}
+  [role="tablist"] > :not([role="tab"]), [data-baseweb="tab-highlight"], [data-baseweb="tab-border"] {display:none;}
 
-  .insights {{display:grid; grid-template-columns:repeat(4, minmax(0,1fr)); gap:14px; margin:6px 0 14px;}}
-  .ins {{background:{CARD}; border:1px solid {BORDER}; border-left:4px solid var(--c);
-         border-radius:14px; padding:14px 16px; box-shadow:{SHADOW};}}
-  .ins h4 {{margin:0 0 6px; font-size:.92rem; color:{TEXT}; font-weight:700;}}
-  .ins p {{margin:0; font-size:.83rem; line-height:1.5; color:{TEXT_2};}}
-  .ins b {{color:{TEXT};}}
+  .insights {display:grid; grid-template-columns:repeat(4, minmax(0,1fr)); gap:14px; margin:6px 0 14px;}
+  .ins {background:#ffffff; border:1px solid rgba(20,25,60,.10); border-left:4px solid var(--c);
+         border-radius:14px; padding:14px 16px; box-shadow:0 6px 18px rgba(20,25,60,.07);}
+  .ins h4 {margin:0 0 6px; font-size:.92rem; color:#1a1c2e; font-weight:700;}
+  .ins p {margin:0; font-size:.83rem; line-height:1.5; color:#3d4058;}
+  .ins b {color:#1a1c2e;}
 
-  .section {{font-size:1.02rem; font-weight:800; color:{TEXT}; margin:10px 0 6px; display:flex; gap:8px;
-             align-items:center;}}
-  .section .bar {{width:5px; height:20px; border-radius:3px;
-                 background:linear-gradient({MAGENTA},{YELLOW});}}
-  [class*="st-key-card_"] {{background:{CARD}; border:1px solid {BORDER} !important;
-                            border-radius:14px; padding:12px 14px 6px; box-shadow:{SHADOW};}}
-  /* Kartu berdampingan dibuat sama tinggi (border rata). */
-  [data-testid="stHorizontalBlock"] {{align-items:stretch;}}
-  [data-testid="stColumn"] > [data-testid="stVerticalBlock"] {{height:100%;}}
-  [data-testid="stColumn"] [data-testid="stLayoutWrapper"]:has(> [class*="st-key-card_"]) {{flex:1 1 auto;}}
-  [data-testid="stColumn"] [class*="st-key-card_"] {{height:100%;}}
-  .ctitle {{font-size:.95rem; font-weight:700; color:{TEXT}; margin:2px 0 4px;}}
-  .badge {{display:inline-block; font-size:.66rem; font-weight:700; padding:2px 7px; border-radius:6px;
+  .section {font-size:1.02rem; font-weight:800; color:#1a1c2e; margin:10px 0 6px; display:flex; gap:8px;
+             align-items:center;}
+  .section .bar {width:5px; height:20px; border-radius:3px;
+                 background:linear-gradient(#E20074,#FFD100);}
+  [class*="st-key-card_"] {background:#ffffff; border:1px solid rgba(20,25,60,.10) !important;
+                            border-radius:14px; padding:12px 14px 6px; box-shadow:0 6px 18px rgba(20,25,60,.07);}
+  [data-testid="stHorizontalBlock"] {align-items:stretch;}
+  [data-testid="stColumn"] > [data-testid="stVerticalBlock"] {height:100%;}
+  [data-testid="stColumn"] [data-testid="stLayoutWrapper"]:has(> [class*="st-key-card_"]) {flex:1 1 auto;}
+  [data-testid="stColumn"] [class*="st-key-card_"] {height:100%;}
+  .ctitle {font-size:.95rem; font-weight:700; color:#1a1c2e; margin:2px 0 4px;}
+  .badge {display:inline-block; font-size:.66rem; font-weight:700; padding:2px 7px; border-radius:6px;
            margin-right:8px; vertical-align:middle; color:var(--c); border:1px solid var(--c);
-           background:color-mix(in srgb, var(--c) 14%, transparent);}}
+           background:color-mix(in srgb, var(--c) 14%, transparent);}
+</style>
+""", unsafe_allow_html=True)
 
 import html  # noqa: E402
 import io  # noqa: E402
