@@ -56,7 +56,7 @@ LOCK_FILE = SHARED_DIR / "upload.lock"
 SOW_FILE = SHARED_DIR / "sow_override.json"
 LOCK_TIMEOUT_S = 180       # lock unggahan dianggap basi setelah 3 menit
 REFRESH_EVERY = "15s"      # interval cek data baru untuk auto-refresh semua pengguna
-PREP_VERSION = 4           # naikkan bila kolom turunan di prepare() berubah, agar cache lama tidak dipakai
+PREP_VERSION = 5           # naikkan bila kolom turunan di prepare() berubah, agar cache lama tidak dipakai
 
 # Warna khas Indosat di atas latar gelap.
 MAGENTA, YELLOW, RED, TOSCA = "#E20074", "#FFD100", "#ED1C24", "#00A3AD"
@@ -68,13 +68,18 @@ TEXT, TEXT_2, MUTED = "#1a1c2e", "#3d4058", "#6b7090"
 GRID = "rgba(30,35,70,0.09)"
 BORDER, SHADOW = "rgba(20,25,60,.10)", "0 6px 18px rgba(20,25,60,.07)"
 FONT = 'Inter, "Segoe UI", system-ui, sans-serif'
+GREY, TEAL = "#7F7F7F", "#26B5A7"
+# Seri grafik Trends [General] — label & warna mengikuti grafik Excel.
 SERIES = {
-    "A": ("A: Akumulasi TT open bulan sebelumnya", "#8a8fa8"),
-    "B": ("B: TT baru per bulan", MAGENTA),
-    "C": ("C: Akumulasi TT open per bulan", YELLOW),
-    "D": ("D: TT close per bulan", TOSCA),
-    "E": ("E: Sisa TT masih open [C−D]", RED),
+    "A": ("A: Accumulative of TT Open previous Month", YELLOW),
+    "B": ("B: New TT are released per Month", MAGENTA),
+    "C": ("C: Accumulative TT Open Per Month", GREY),
+    "D": ("D: Achievement TT close per Month", TEAL),
+    "E": ("E: The remaining of TT still OPEN per month [C-D]", RED),
 }
+# Warna bawaan Excel (pie LTOA & Root Cause di Excel memakai palet ini).
+EXCEL_COLORS = ["#4472C4", "#ED7D31", "#A5A5A5", "#FFC000", "#5B9BD5", "#70AD47", "#264478", "#9E480E"]
+REGION_ORDER = ["SUM", "KALISU", "JAYA", "JAVA"]
 
 # Kategori dari teks bebas (Stolen: Material Stolen, CME: Description) — urutan = prioritas.
 STOLEN_RULES = [
@@ -143,12 +148,12 @@ CATEGORIES = {
         sheet="List Stolen", month="Month Open", status="Status TT ToCo/OpCo", toco=["Toco Group Name"],
         owner="Toco Owner",
         cause="Material Stolen", cause_rules=STOLEN_RULES, root=[], severity="TT Status [Critical/Major]",
-        aging="Aging TT", year="Year Open", site_id="IOH ID", impact=[],
+        aging="Aging TT", year="Year Open", site_id="IOH ID", impact=[], tt="TT IOH", count_tt=True,
         search=["IOH ID", "Old Site ID", "Site Name", "TT IOH", "Material Stolen"], icon="🔓"),
     "TT CME": dict(
         sheet="TT CME", month="Create Month", status="STATUS TT TLP", toco=["Owner"], owner="Owner",
         cause="Description", cause_rules=CME_RULES, root=[], severity="Severity", aging="Aging TT CLOSED",
-        year=None, site_id="Site ID", impact=[], backlog="Backlog",
+        year=None, site_id="Site ID", impact=[], backlog="Backlog", tt="TT Number", count_tt=True,
         search=["Site ID", "Site Name", "TT Number", "Description"], icon="🛠️"),
 }
 REGION_COL = "New Region"
@@ -509,7 +514,8 @@ def prepare(_df: pd.DataFrame, cat: str) -> pd.DataFrame:
                                else "Closed" if s.startswith("close") else "Lainnya")
     df["_cat"] = cat
     df["_region"] = _col(df, REGION_COL)
-    df["_toco"] = _col(df, _first(df, cfg["toco"])).map(toco_code)
+    df["_toco_raw"] = _col(df, _first(df, cfg["toco"]))  # nama asli (GROUP1 / Toco Group Name / Owner)
+    df["_toco"] = df["_toco_raw"].map(toco_code)
     df["_owner"] = _unify_case(_col(df, cfg.get("owner")))
     raw_cause = _col(df, cfg["cause"])
     df["_cause"] = classify(raw_cause, cfg["cause_rules"]) if cfg.get("cause_rules") else raw_cause
@@ -673,6 +679,15 @@ def empty_fig(msg: str, height: int = 320) -> go.Figure:
     return fig
 
 
+def _light(color: str) -> bool:
+    """Warna terang (kuning, abu muda, ...) -> label di atasnya pakai teks gelap."""
+    h = str(color).lstrip("#")[:6]
+    if len(h) != 6:
+        return False
+    r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
+    return 0.299 * r + 0.587 * g + 0.114 * b > 150
+
+
 def pie_3d(labels, values, colors, *, hole: float = 0.0, texts=None, height: int = 380,
            center: str | None = None) -> go.Figure:
     """Pie bergaya '3D': irisan sedikit ditarik, tepi gelap, dan bayangan elips di bawahnya."""
@@ -691,7 +706,7 @@ def pie_3d(labels, values, colors, *, hole: float = 0.0, texts=None, height: int
         text=texts, texttemplate="%{text}" if texts else "%{value:,.0f}<br>%{percent}",
         textposition="auto", insidetextorientation="horizontal",
         # Teks gelap di irisan kuning, putih di irisan lain, agar tetap terbaca.
-        textfont=dict(size=12, color=[TEXT if c in (YELLOW, ORANGE) else "#ffffff" for c in colors], family=FONT),
+        textfont=dict(size=12, color=[TEXT if _light(c) else "#ffffff" for c in colors], family=FONT),
         outsidetextfont=dict(size=11, color=TEXT_2),
         hovertemplate="<b>%{label}</b><br>%{value:,.0f} (%{percent})<extra></extra>",
     ))
@@ -706,174 +721,35 @@ def pie_3d(labels, values, colors, *, hole: float = 0.0, texts=None, height: int
     return fig
 
 
-def impact_by_group(access: pd.DataFrame, owners: list[str] | None = None, top: int = 4) -> pd.Series:
-    """Total TT Impact Service Released per grup ToCo (Site Owner dikelompokkan lewat kolom GROUP1,
-    mis. Protelindo/STP/IBS/IFORTE -> PTI), hanya `top` grup teratas — seperti tabel di Excel."""
-    imp = access[access["_impact"] & access["_status"].isin(["Open", "Closed"])]
-    if owners:
-        imp = imp[imp["_owner"].isin(owners)]
-    s = imp[imp["_toco"] != "(Kosong)"].groupby("_toco").size().sort_values(ascending=False)
-    return s.head(top)
-
-
-def impact_donut(s: pd.Series) -> go.Figure:
-    """Donut Top 4 grup; persentase dihitung terhadap jumlah keempat grup (sama dengan pie Excel)."""
-    if s.empty:
-        return empty_fig("Belum ada TT impact service pada filter ini.")
-    total = s.sum()
-    texts = [f"{fmt(v)}<br>{k}<br>{pct(v / total * 100, 0)}" for k, v in s.items()]
-    return pie_3d(list(s.index), list(s.values), PALETTE[:len(s)], hole=0.45, texts=texts,
-                  center=f"<b>{fmt(total)}</b><br><span style='font-size:11px'>TT Impact (Top {len(s)})</span>")
-
-
-def sow_pie(a: float, b: float, label_b: str, color_b: str) -> go.Figure:
-    """Pie SoW (A) vs bagian B; persentase B = B / A seperti kolom % (B/A) di Excel."""
-    if not a or pd.isna(a):
-        return empty_fig("SoW (A) untuk TLP ini belum diisi — atur di tabel SoW.")
-    b = min(b, a)
-    p = b / a * 100
-    texts = [f"{fmt(a)}; {pct(100 - p, 2)}", f"{fmt(b)}; {pct(p, 2)}"]
-    fig = pie_3d([f"SoW (A)", label_b], [a - b, b], [MAGENTA, color_b], texts=texts)
-    fig.data[1].customdata = [a, b]
-    fig.data[1].hovertemplate = "<b>%{label}</b><br>%{customdata:,.0f} site<extra></extra>"
+def share_pie(parts: dict[str, float], colors: list[str]) -> go.Figure:
+    """Pie 3D SoW (A) vs Total Sites: persen = bagian dari jumlah irisan (sama dengan label pie Excel)."""
+    total = sum(parts.values())
+    texts = [f"{fmt(v)}; {pct(v / total * 100, 2)}" for v in parts.values()]
+    fig = pie_3d(list(parts), list(parts.values()), colors, texts=texts)
     fig.data[1].pull = [0, 0.12]
     return fig
 
 
-def root_cause_pie(d: pd.DataFrame, height: int = 380) -> go.Figure:
-    s = top_n(d.loc[d["_root"] != "(Kosong)", "_root"].value_counts(), 5)
+def ltoa_pie(s: pd.Series) -> go.Figure:
+    """LTOA & Cell Down Contribution: Total TT Impact Service Released per ToCo terpilih."""
+    s = s[s > 0]
     if s.empty:
-        return empty_fig("Kolom root cause / header case kosong pada filter ini.")
+        return empty_fig("Belum ada TT impact service (Site Status Down) pada pilihan ini.", 380)
+    total = s.sum()
+    texts = [f"{fmt(v)}<br>{k}<br>{pct(v / total * 100, 0)}" for k, v in s.items()]
+    return pie_3d(list(s.index), list(s.values), [EXCEL_COLORS[i % len(EXCEL_COLORS)] for i in range(len(s))],
+                  texts=texts)
+
+
+def root_cause_pie(d: pd.DataFrame, top: int = 7, height: int = 400) -> go.Figure:
+    """The Root Cause: Count of Huawei TT per kolom Case, Top `top` (persen terhadap jumlah yang tampil)."""
+    s = d.loc[d["_has_tt"] & (d["_root"] != "(Kosong)"), "_root"].value_counts().head(top)
+    if s.empty:
+        return empty_fig("Kolom Case kosong pada pilihan ini.", height)
     total = s.sum()
     texts = [f"{fmt(v)}; {pct(v / total * 100, 0)}" for v in s.values]
-    labels = [wrap(k, 28) for k in s.index]
-    return pie_3d(labels, list(s.values), PALETTE[:len(s)], texts=texts, height=height)
-
-
-def summary_chart(t: pd.DataFrame) -> go.Figure:
-    x, n = t.index.tolist(), len(t)
-    fig = go.Figure()
-    for key in ["A", "B", "C", "D"]:
-        name, color = SERIES[key]
-        fig.add_trace(go.Bar(
-            x=x, y=t[key], name=name, marker_color=color, text=bar_text(t[key]),
-            # Label vertikal: 4 bar per bulan tidak cukup lebar untuk label mendatar.
-            textposition="outside", textangle=-90 if n > 6 else 0, textfont=dict(size=10, color=TEXT_2),
-            cliponaxis=False, hovertemplate=f"<b>%{{x}}</b><br>{name}: %{{y:,.0f}}<extra></extra>"))
-    name, color = SERIES["E"]
-    fig.add_trace(go.Scatter(
-        x=x, y=t["E"], name=name, yaxis="y2", mode="lines+markers+text", text=bar_text(t["E"]),
-        textposition="top center", textfont=dict(size=11, color=color), cliponaxis=False,
-        line=dict(color=color, width=2.5), marker=dict(size=8, color=color, line=dict(color=BG, width=2)),
-        hovertemplate=f"<b>%{{x}}</b><br>{name}: %{{y:,.0f}}<extra></extra>"))
-    bar_max = float(t[["A", "B", "C", "D"]].to_numpy().max() or 1)
-    e_max = float(t["E"].max() or 1)
-    step = max(1, round(e_max / 2))
-    dark(fig, 520)
-    # Bar di ±55% bawah, garis E di ±35% atas (sumbu kanan dimulai negatif) agar label tidak bertabrakan.
-    fig.update_layout(
-        barmode="group", bargroupgap=0.06, hovermode="x unified", margin=dict(t=90),
-        legend=dict(x=0, xanchor="left", y=1.02, entrywidth=270, entrywidthmode="pixels"),
-        yaxis=dict(range=[0, bar_max * 1.9], tickformat=",.0f", title=dict(text="Jumlah TT", font=dict(color=MUTED))),
-        yaxis2=dict(overlaying="y", side="right", range=[-e_max * 2.1, e_max * 1.15], showgrid=False,
-                    tickmode="array", tickvals=[0, step, step * 2] if step * 2 <= e_max * 1.15 else [0, step],
-                    tickformat=",.0f", tickfont=dict(color=RED), zeroline=False,
-                    title=dict(text="Sisa TT open (E)", font=dict(color=RED))),
-        xaxis=dict(tickangle=-30 if n > 8 else 0, showgrid=False))
-    return fig
-
-
-def progress_chart(t: pd.DataFrame) -> go.Figure:
-    fig = go.Figure()
-    for col, color, pos in [("Progress (%)", TOSCA, "inside"), ("Remaining (%)", RED, "outside")]:
-        fig.add_trace(go.Bar(x=t.index, y=t[col], name=col.replace(" (%)", ""), marker_color=color,
-                             text=bar_text(t[col], pct), textposition=pos, insidetextanchor="middle",
-                             textangle=0, textfont=dict(size=10, color="#fff" if pos == "inside" else TEXT_2),
-                             hovertemplate=f"<b>%{{x}}</b><br>{col}: %{{y:.1f}}%<extra></extra>"))
-    dark(fig, 300)
-    fig.update_layout(barmode="stack", uniformtext=dict(minsize=8, mode="hide"),
-                      yaxis=dict(range=[0, 112], ticksuffix="%"), xaxis=dict(tickangle=-30, showgrid=False))
-    return fig
-
-
-def open_close_region(d: pd.DataFrame) -> go.Figure:
-    if d.empty:
-        return empty_fig("Tidak ada data.")
-    ct = pd.crosstab(d["_region"], d["_status"]).reindex(columns=["Closed", "Open"], fill_value=0)
-    ct = ct.loc[ct.sum(axis=1).sort_values(ascending=False).index]
-    fig = go.Figure()
-    for col, color, label in [("Closed", TOSCA, "CLOSE"), ("Open", MAGENTA, "OPEN")]:
-        fig.add_trace(go.Bar(x=ct.index, y=ct[col], name=label, marker_color=color, text=bar_text(ct[col]),
-                             textposition="outside", textfont=dict(size=11, color=TEXT_2), cliponaxis=False,
-                             hovertemplate=f"<b>%{{x}}</b><br>{label}: %{{y:,.0f}}<extra></extra>"))
-    dark(fig, 360)
-    fig.update_layout(barmode="group", yaxis=dict(range=[0, (ct.to_numpy().max() or 1) * 1.18]))
-    return fig
-
-
-def mttr_by(d: pd.DataFrame, col: str, top: int = 12, height: int = 360) -> go.Figure:
-    closed = d[d["_status"].eq("Closed")]
-    g = closed.groupby(col)["_aging"].agg(["mean", "size"]).dropna()
-    if g.empty:
-        return empty_fig("Belum ada tiket CLOSE pada filter ini.", height)
-    g = g.sort_values("size", ascending=False).head(top).sort_values("mean", ascending=False)
-    avg = closed["_aging"].mean()
-    fig = go.Figure(go.Bar(
-        x=[wrap(i) for i in g.index], y=g["mean"], marker_color=[RED if v > avg else TOSCA for v in g["mean"]],
-        text=[f"{days(v)} d" for v in g["mean"]], textposition="outside", textfont=dict(size=11, color=TEXT_2),
-        cliponaxis=False, customdata=g["size"],
-        hovertemplate="<b>%{x}</b><br>MTTR: %{y:.2f} hari<br>%{customdata:,} tiket close<extra></extra>"))
-    fig.add_hline(y=avg, line=dict(color=YELLOW, dash="dash", width=1.5),
-                  annotation_text=f"Rata-rata {days(avg)} d", annotation_position="top right",
-                  annotation_font=dict(color=GOLD, size=11))
-    dark(fig, height, legend_top=False)
-    fig.update_layout(showlegend=False, margin=dict(t=26),
-                      yaxis=dict(range=[0, g["mean"].max() * 1.22], title="hari"),
-                      xaxis=dict(tickangle=-30 if len(g) > 8 else 0, tickfont=dict(size=10)))
-    return fig
-
-
-def mttr_table(access: pd.DataFrame) -> pd.DataFrame:
-    """Per grup ToCo (impact service: Site Status Down, Case Status Open/Closed):
-    tt   = Count of Huawei TT, aging = Sum Aging Time (Days), mttr = tt ÷ aging."""
-    imp = access[access["_impact"] & access["_status"].isin(["Open", "Closed"])]
-    g = imp.groupby("_toco").agg(tt=("_has_tt", "sum"), aging=("_aging", "sum"))
-    g = g.reindex([t for t in TOCO_ORDER if t in g.index])
-    g = g[g["tt"] > 0]
-    g["mttr"] = g["tt"] / g["aging"].where(g["aging"] > 0)  # aging 0 -> tidak bisa dibagi (kosong)
-    return g
-
-
-def _group_bar(g: pd.DataFrame, col: str, color: str, fmt_fn, avg: float | None, avg_label: str,
-               y_title: str, hover: str, height: int) -> go.Figure:
-    s = g[col].dropna()
-    fig = go.Figure(go.Bar(
-        x=[wrap(i) for i in s.index], y=s.values, marker_color=color, name=y_title, text=[fmt_fn(v) for v in s.values],
-        textposition="outside", textfont=dict(size=11, color=TEXT_2), cliponaxis=False,
-        customdata=list(zip(g.loc[s.index, "tt"], g.loc[s.index, "aging"])), hovertemplate=hover))
-    if avg is not None and pd.notna(avg):
-        fig.add_hline(y=avg, line=dict(color=YELLOW, dash="dash", width=1.5), annotation_text=avg_label,
-                      annotation_position="top right", annotation_font=dict(color=GOLD, size=11))
-    dark(fig, height, legend_top=False)
-    fig.update_layout(showlegend=False, margin=dict(t=26),
-                      yaxis=dict(range=[0, (s.max() if len(s) else 1) * 1.22], title=y_title),
-                      xaxis=dict(tickangle=-30 if len(s) > 8 else 0, tickfont=dict(size=10)))
-    return fig
-
-
-HOVER_GROUP = ("<b>%{x}</b><br>Count Huawei TT: %{customdata[0]:,}<br>Sum Aging: %{customdata[1]:,.1f} hari"
-               "<extra></extra>")
-
-
-def mttr_group(access: pd.DataFrame, height: int = 360) -> go.Figure:
-    """MTTR = Count of Huawei TT ÷ Sum Aging Time (Days) per grup ToCo."""
-    g = mttr_table(access)
-    if g["mttr"].dropna().empty:
-        return empty_fig("Belum ada TT impact service pada filter ini.", height)
-    avg = g["tt"].sum() / g["aging"].sum() if g["aging"].sum() > 0 else None
-    return _group_bar(g, "mttr", TOSCA, lambda v: days(v), avg, f"Total {days(avg)}" if avg else "",
-                      "TT ÷ Aging", "<b>%{x}</b><br>MTTR (TT ÷ Aging): %{y:.2f}<br>"
-                      + HOVER_GROUP.split("<br>", 1)[1], height)
+    return pie_3d([wrap(k, 28) for k in s.index], list(s.values), EXCEL_COLORS[:len(s)], texts=texts,
+                  height=height)
 
 
 def ranked(d: pd.DataFrame, col: str, top: int = 10, color: str = TOSCA, height: int = 360) -> go.Figure:
@@ -914,27 +790,6 @@ def pareto(d: pd.DataFrame | None, col: str | None, top: int = 15, values: pd.Se
                       yaxis2=dict(overlaying="y", side="right", range=[-45, 112], showgrid=False,
                                   tickvals=[0, 50, 100], ticksuffix="%", tickfont=dict(color=GOLD)),
                       xaxis=dict(tickangle=-30 if len(vc) > 8 else 0, tickfont=dict(size=10)))
-    return fig
-
-
-def monthly_status(d: pd.DataFrame) -> go.Figure:
-    if d.empty:
-        return empty_fig("Tidak ada data.")
-    ct = pd.crosstab(d["_period"], d["_status"]).reindex(columns=["Closed", "Open"], fill_value=0).sort_index()
-    x = [p.strftime("%b_%Y") for p in ct.index]
-    fig = go.Figure()
-    for col, color, label in [("Closed", TOSCA, "CLOSE"), ("Open", MAGENTA, "OPEN")]:
-        fig.add_trace(go.Bar(x=x, y=ct[col], name=label, marker_color=color,
-                             text=bar_text(ct[col].where(ct[col] > 0)), textposition="inside",
-                             insidetextanchor="middle", textangle=0, textfont=dict(size=10, color="#fff"),
-                             hovertemplate=f"<b>%{{x}}</b><br>{label}: %{{y:,.0f}}<extra></extra>"))
-    total = ct.sum(axis=1)
-    fig.add_trace(go.Scatter(x=x, y=total, mode="text", text=bar_text(total), textposition="top center",
-                             textfont=dict(size=11, color=TEXT), showlegend=False, hoverinfo="skip"))
-    dark(fig, 360)
-    fig.update_layout(barmode="stack", uniformtext=dict(minsize=8, mode="hide"),
-                      yaxis=dict(range=[0, total.max() * 1.15]),
-                      xaxis=dict(tickangle=-30 if len(x) > 8 else 0, showgrid=False))
     return fig
 
 
@@ -1075,7 +930,7 @@ def clustered_groups(ct: pd.DataFrame, x: list[str], colors: dict, total_line: b
 
 def mttr_critical_table(df: pd.DataFrame) -> pd.DataFrame:
     """Pivot Severity CRITICAL per GROUP: Count of Huawei TT, Sum of Aging Time, MTTR = Sum Aging ÷ TT
-    (rumus Excel =E118/D118). Berbeda dari mttr_table() yang memakai TT ÷ Aging."""
+    (rumus Excel =E118/D118)."""
     crit = df[df["_has_tt"] & (df["_sev"].str.upper() == "CRITICAL")]
     g = crit.groupby("_grp").agg(tt=("_grp", "size"), aging=("_aging", "sum"))
     g = g.reindex([x for x in GROUP_ORDER if x in g.index])
@@ -1105,6 +960,120 @@ def mttr_critical_chart(g: pd.DataFrame) -> go.Figure:
                                   range=[0, (g["mttr"].max() or 1) * 1.25], title="MTTR (hari)",
                                   tickfont=dict(color=ORANGE)),
                       xaxis=dict(showgrid=False))
+    return fig
+
+
+# ---------- Trends [General] / Latest update [Region Basis] / [ToCo Basis] (Access, Stolen, CME) ----------
+
+def span_label(win: list) -> str:
+    return f"{win[0]:%b %Y} – {win[-1]:%b %Y}" if len(win) > 1 else f"{win[0]:%b %Y}"
+
+
+def split_labels(win: list) -> tuple[str | None, str]:
+    """Kolom pivot 'bulan-bulan sebelumnya' (mis. Oct 25 - Sep 26) dan 'bulan terakhir' (mis. Oct-26)."""
+    prev = f"{win[0]:%b %y} - {win[-2]:%b %y}" if len(win) > 2 else (f"{win[0]:%b-%y}" if len(win) == 2 else None)
+    return prev, f"{win[-1]:%b-%y}"
+
+
+def trend_chart(t: pd.DataFrame) -> go.Figure:
+    """Seperti grafik Excel: batang A–D per bulan, E sebagai garis pendek merah."""
+    x = t.index.tolist()
+    fig = go.Figure()
+    for key in "ABCD":
+        name, color = SERIES[key]
+        fig.add_trace(go.Bar(x=x, y=t[key], name=name, marker_color=color,
+                             hovertemplate=f"{name}: %{{y:,.0f}}<extra></extra>"))
+    name, color = SERIES["E"]
+    fig.add_trace(go.Scatter(x=x, y=t["E"], name=name, mode="markers", line=dict(color=color),
+                             marker=dict(symbol="line-ew", size=26, color=color, line=dict(color=color, width=6)),
+                             hovertemplate=f"{name}: %{{y:,.0f}}<extra></extra>"))
+    dark(fig, 440)
+    fig.update_layout(barmode="group", bargap=0.2, bargroupgap=0.04, hovermode="x unified", margin=dict(t=72),
+                      legend=dict(x=0, xanchor="left", y=1.02, entrywidth=330, entrywidthmode="pixels"),
+                      yaxis=dict(tickformat=",.0f", title=dict(text="TT Released", font=dict(color=MUTED))),
+                      xaxis=dict(showgrid=False, tickangle=-30 if len(x) > 10 else 0))
+    return fig
+
+
+def grid_html(df: pd.DataFrame, colors: dict | None = None, pct_rows: tuple = ()) -> str:
+    """Tabel data di bawah grafik (seperti data table grafik Excel): baris = seri, kolom = kategori."""
+    colors = colors or {}
+    th = f"padding:4px 6px;border:1px solid #E3E5EE;background:#F4F5F9;color:{TEXT};font-weight:700;text-align:center"
+    td = "padding:4px 6px;border:1px solid #E3E5EE;text-align:center"
+    head = f"<tr><th style='{th}'></th>" + "".join(f"<th style='{th}'>{esc(c)}</th>" for c in df.columns) + "</tr>"
+    body = ""
+    for name, row in df.iterrows():
+        sw = (f"<span style='display:inline-block;width:9px;height:9px;margin-right:6px;background:{colors[name]}'>"
+              "</span>" if name in colors else "")
+        f_ = (lambda v: pct(v, 0)) if name in pct_rows else fmt
+        body += (f"<tr><td style='{td};text-align:left;white-space:nowrap;font-weight:600'>{sw}{esc(name)}</td>"
+                 + "".join(f"<td style='{td}'>{f_(v)}</td>" for v in row.values) + "</tr>")
+    return (f"<div style='overflow-x:auto;font-size:.74rem;color:{TEXT_2};margin:-4px 0 8px'>"
+            f"<table style='border-collapse:collapse;width:100%'>{head}{body}</table></div>")
+
+
+def trend_grid(t: pd.DataFrame) -> str:
+    rows = t[list("ABCDE")].rename(columns={k: v[0] for k, v in SERIES.items()}).T
+    rows.loc["Progress (%)"] = t["Progress (%)"].values
+    rows.loc["Remaining (%)"] = t["Remaining (%)"].values
+    return grid_html(rows, {v[0]: v[1] for v in SERIES.values()}, ("Progress (%)", "Remaining (%)"))
+
+
+def _with_total_row(ct: pd.DataFrame) -> pd.DataFrame:
+    ct = ct.copy()
+    ct.loc["Grand Total"] = ct.sum()
+    return ct.astype(int)
+
+
+def region_tables(df: pd.DataFrame, win: list) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Pivot New Region: (1) total TT/bulan = bulan sebelumnya | bulan terakhir | Grand Total,
+    (2) total TT all = Closed | Open | Grand Total. Keduanya dengan baris Grand Total."""
+    w = df[df["_period"].isin(win)]
+    found = set(w["_region"])
+    regions = [r for r in REGION_ORDER if r in found] + sorted(found - set(REGION_ORDER))
+    prev, last = split_labels(win)
+    month = pd.DataFrame({last: w[w["_period"] == win[-1]].groupby("_region").size()})
+    if prev:
+        month.insert(0, prev, w[w["_period"] != win[-1]].groupby("_region").size())
+    month = month.reindex(regions).fillna(0)
+    month["Grand Total"] = month.sum(axis=1)
+    status = pd.crosstab(w["_region"], w["_status"]).reindex(index=regions, columns=["Closed", "Open"], fill_value=0)
+    status["Grand Total"] = status.sum(axis=1)
+    return _with_total_row(month).rename_axis("New Region"), _with_total_row(status).rename_axis("New Region")
+
+
+def toco_table(df: pd.DataFrame, win: list, col: str, closed_mode: bool = False) -> pd.DataFrame:
+    """Pivot per Tower Company: bulan sebelumnya | bulan terakhir | Grand Total (urut terbesar), atau
+    (closed_mode, seperti Stolen) total periode | Closed Total."""
+    w = df[df["_period"].isin(win) & (df[col] != "(Kosong)")]
+    if closed_mode:
+        t = pd.DataFrame({f"{win[0]:%b %y} - {win[-1]:%b %y}": w.groupby(col).size(),
+                          "Closed Total": w[w["_status"] == "Closed"].groupby(col).size()})
+        t = t.fillna(0).sort_values(t.columns[0], ascending=False)
+    else:
+        prev, last = split_labels(win)
+        t = pd.DataFrame({last: w[w["_period"] == win[-1]].groupby(col).size()})
+        if prev:
+            t.insert(0, prev, w[w["_period"] != win[-1]].groupby(col).size())
+        t = t.fillna(0)
+        t["Grand Total"] = t.sum(axis=1)
+        t = t.sort_values("Grand Total", ascending=False)
+    return t.astype(int).rename_axis("Tower Company")
+
+
+def basis_chart(ct: pd.DataFrame, colors: list[str], height: int = 380, wrap_w: int = 12) -> go.Figure:
+    """Batang berkelompok per kategori (region / ToCo), satu seri per kolom pivot."""
+    x = [wrap(i, wrap_w) for i in ct.index]
+    fig = go.Figure()
+    for i, col in enumerate(ct.columns):
+        fig.add_trace(go.Bar(x=x, y=ct[col], name=str(col), marker_color=colors[i % len(colors)],
+                             text=_labels(ct[col]), textposition="outside", textangle=0,
+                             textfont=dict(size=9 if len(ct) > 6 else 10, color=TEXT_2), cliponaxis=False,
+                             hovertemplate=f"<b>%{{x}}</b><br>{col}: %{{y:,}}<extra></extra>"))
+    dark(fig, height)
+    fig.update_layout(barmode="group", bargap=0.22, bargroupgap=0.04,
+                      yaxis=dict(range=[0, float(ct.to_numpy().max() or 1) * 1.15], tickformat=",.0f"),
+                      xaxis=dict(showgrid=False, tickfont=dict(size=10)))
     return fig
 
 
@@ -1253,11 +1222,11 @@ def _cw_key(cw: str) -> tuple[int, int]:
 
 
 def chart_card(key: str, badge: str, color: str, title: str, fig, exports: list | None = None,
-               table: pd.DataFrame | None = None, pie_labels: str = "value_percent") -> None:
+               table: pd.DataFrame | None = None, pie_labels: str = "value_percent", below: str | None = None) -> None:
     """Kartu grafik. `fig` boleh berupa fungsi: dipanggil di dalam kartu, sehingga widget
     pengatur (mis. dropdown) bisa tampil di antara judul dan grafik.
     Bila `exports` diberikan, angka grafik disimpan untuk Export Excel & PPT; `table` mengganti
-    tabel Excel bawaan bila perlu kolom yang lebih jelas."""
+    tabel Excel bawaan bila perlu kolom yang lebih jelas; `below` = HTML (mis. tabel data) di bawah grafik."""
     with st.container(key=f"card_{key}"):
         st.markdown(f"<div class='ctitle'><span class='badge' style='--c:{color}'>{esc(badge)}</span>"
                     f"{esc(title)}</div>", unsafe_allow_html=True)
@@ -1265,6 +1234,8 @@ def chart_card(key: str, badge: str, color: str, title: str, fig, exports: list 
             fig = fig()
         st.plotly_chart(fig, width="stretch", config={"displaylogo": False, "displayModeBar": False},
                         key=f"fig_{key}")
+        if below:
+            st.markdown(below, unsafe_allow_html=True)
     if exports is not None:
         spec = fig_export(fig)
         if spec is not None:
@@ -1490,6 +1461,9 @@ if st.session_state.get("loaded_sig") not in (None, current_sig):
     st.toast(f"📥 Data baru diunggah oleh {source_meta.get('uploader', '-')} — dashboard diperbarui.")
 st.session_state["loaded_sig"] = current_sig
 
+# Dropdown/slider di dalam tab (ikut di-reset & menentukan ulang isi PPT).
+WIDGET_KEYS = ("rpt_weeks", "rpt_range", "rpt_owner", "stl_range", "cme_range", "ltoa_toco", "imp_toco", "rc_group1",
+               "stl_owner")
 FILTER_KEYS = ("f_cat", "f_year", "f_region", "f_tlp", "f_cause", "f_status", "f_month", "f_sev", "f_backlog", "f_q")
 
 head_l, head_r = st.columns([1.05, 1], vertical_alignment="center")
@@ -1524,11 +1498,11 @@ with head_r:
             f"3. Semua pengguna yang membuka dashboard otomatis ter-refresh (cek tiap {REFRESH_EVERY}).\n"
             "4. Sheet wajib: **List Access Issue**, **List Stolen**, **TT CME** (header di baris pertama).\n"
             "   SoW (A) dibaca dari sheet **performance access** bila ada.\n\n"
-            "Grafik A–E: TT berstatus *Cancel* tidak dihitung (sama dengan pivot Summary).")
+            "Grafik Trends A–E: TT berstatus *Cancel* tidak dihitung (sama dengan pivot Excel).")
     xlsx_slot = b3.empty()
     ppt_slot = b4.empty()
     if b5.button("↻ Reset Filter", width="stretch"):
-        for k in [k for k in st.session_state if str(k).startswith(FILTER_KEYS) or k in ("ae_range", "target_tlp", "g1_owner", "g4_owner", "rpt_weeks")]:
+        for k in [k for k in st.session_state if str(k).startswith(FILTER_KEYS) or k in WIDGET_KEYS]:
             st.session_state.pop(k, None)
         st.rerun()
 
@@ -1621,8 +1595,6 @@ with st.container(key="filterbar"):
 FILTERS = dict(years=f_year, regions=f_region, tlp=f_tlp, cause=f_cause, sev=f_sev, backlog=f_backlog,
                q=f_q.strip(), months=f_month, status=f_status)
 d = apply_filters(base, FILTERS)
-dim = apply_filters(base, FILTERS, status=False, month=False)
-dim = dim[dim["_status"] != "Cancel"]  # dasar grafik A–E (Cancel tidak dihitung, sama dengan pivot)
 
 filter_parts = [f"Kategori: {', '.join(cats)}"]
 for label, vals in [("Tahun", f_year), ("Region", f_region), ("TLP", f_tlp), ("Cause", f_cause),
@@ -1722,7 +1694,73 @@ def insights(d: pd.DataFrame) -> list[tuple[str, str, str]]:
 
 EXPORTS: list[dict] = []                # angka tiap grafik (untuk Export Excel & PPT)
 EXTRA_TABLES: dict[str, pd.DataFrame] = {}  # tabel perhitungan pendukung (hanya Excel)
-tabs = st.tabs(["📊 Executive Summary", "📅 Report TT Access", "📑 COUPA Report", "📈 Trend A–E", "⏱️ MTTR",
+
+
+def tab_filters(cat: str) -> dict:
+    """Filter global untuk satu kategori. Cause & Severity hanya berlaku bila kategori itu dipilih (nilainya
+    berbeda per sheet); status Open + Closed; TT CME default Backlog = Normal TT (seperti pivot Excel)."""
+    f = {**FILTERS, "status": [x for x in FILTERS["status"] if x in ("Open", "Closed")] or ["Open", "Closed"]}
+    if cat not in cats:
+        f.update(cause=[], sev=[])
+    if cat == "TT CME":
+        f["backlog"] = FILTERS["backlog"] or ["Normal TT"]
+    return f
+
+
+def trend_base(cat: str) -> pd.DataFrame:
+    """Dasar grafik Trends/Latest update: Access = Count of Case Status, Stolen = Count of TT IOH,
+    CME = Count of TT Number (baris yang nomor TT-nya terisi)."""
+    df = apply_filters(prepared[cat], tab_filters(cat), month=False)
+    return df[df["_has_tt"]] if CATEGORIES[cat].get("count_tt") else df
+
+
+def trend_section(df: pd.DataFrame, key: str, noun: str, noun_toco: str, toco_col: str, toco_colors: list[str],
+                  top: int, closed_mode: bool = False, owner_pick: bool = False) -> None:
+    """Trends [General] (A–E) + Latest update [Region Basis] (2 grafik) + Latest update [ToCo Basis]."""
+    periods = sorted(df["_period"].unique())
+    if not periods:
+        st.info("Tidak ada data bulan pada filter ini.")
+        return
+    labels = [p.strftime("%b_%Y") for p in periods]
+    win = periods
+    if len(labels) > 1:
+        lo, hi = st.select_slider("Periode (bulan open)", options=labels, key=f"{key}_range",
+                                  value=(labels[max(0, len(labels) - 13)], labels[-1]))
+        win = periods[labels.index(lo): labels.index(hi) + 1]
+    span = span_label(win)
+    t = backlog_summary(df[df["_period"].isin(win)], win)
+    chart_card(f"{key}_gen", "GENERAL", MAGENTA, f"Trends of {noun} for period {span} [General]", trend_chart(t),
+               EXPORTS, table=t.rename(columns={k: v[0] for k, v in SERIES.items()}), below=trend_grid(t))
+
+    section(f"Latest update of {noun} for period {span} [Region Basis]")
+    reg_df = df
+    if owner_pick:
+        owners = df.loc[df["_period"].isin(win), "_owner"].value_counts()
+        owners = owners[owners.index != "(Kosong)"]
+        sel = st.multiselect("Site Owner (grafik Region Basis)", list(owners.index), key=f"{key}_owner",
+                             placeholder="Semua Site Owner", format_func=lambda o: f"{o} ({fmt(owners.get(o))} TT)",
+                             help="Dari kolom Site Owner di sheet List Access Issue.")
+        if sel:
+            reg_df = df[df["_owner"].isin(sel)]
+    month_t, status_t = region_tables(reg_df, win)
+    a, b = st.columns(2)
+    for col_, key_, tbl, sub, colors in [(a, "reg_m", month_t, "Total TT per Month", [TEAL, RED, GREY]),
+                                         (b, "reg_s", status_t, "Total TT All (Closed/Open)", [TEAL, RED, GREY])]:
+        with col_:
+            chart_card(f"{key}_{key_}", "REGION", TOSCA, f"{noun} [Region Basis] · {sub} · {span}",
+                       basis_chart(tbl, colors), EXPORTS, table=tbl,
+                       below=grid_html(tbl.T, dict(zip(tbl.columns, colors))))
+
+    tt = toco_table(df, win, toco_col, closed_mode)
+    show = tt.head(top)
+    chart_card(f"{key}_toco", "TOCO", GOLD, f"Latest update of {noun_toco} for period {span} [ToCo Basis]",
+               basis_chart(show, toco_colors, 420, 11), EXPORTS, table=tt,
+               below=grid_html(show.T, dict(zip(show.columns, toco_colors))))
+    with st.expander(f"Tabel lengkap [ToCo Basis] · {len(tt)} Tower Company"):
+        st.dataframe(tt, width="stretch")
+
+
+tabs = st.tabs(["📊 Executive Summary", "📅 Report TT Access", "📑 COUPA Report", "🔓 Stolen Issue", "🛠️ CME",
                 "🏢 Jumlah TT",
                 "🔎 Root Cause",
                 f"🗂️ Data Explorer ({fmt(len(d))} TT)"])
@@ -1733,77 +1771,93 @@ with tabs[0]:
         f"<div class='ins' style='--c:{c}'><h4>{esc(t)}</h4><p>{body}</p></div>" for t, body, c in insights(d))
         + "</div>", unsafe_allow_html=True)
 
-    # Impact service & stolen memakai data Access Issue / Stolen dengan filter dimensi yang sama
-    # (status Open+Closed sesuai rumus pivot), apa pun kategori yang dipilih.
-    access_f = apply_filters(prepared["Access Issue"], FILTERS, status=False) if "Access Issue" in prepared \
-        else pd.DataFrame(columns=base.columns)
-    stolen_f = apply_filters(prepared["Stolen"], FILTERS, status=False) if "Stolen" in prepared \
-        else pd.DataFrame(columns=base.columns)
-    imp_t = impact_table(access_f, stolen_f, SOW)
-    # Root cause (Grafik 4) selalu dari kolom "Case" di List Access Issue, mengikuti semua filter.
-    access_rc = apply_filters(prepared["Access Issue"], FILTERS) if "Access Issue" in prepared \
-        else pd.DataFrame(columns=base.columns)
+    # Seperti sheet tambahan ke TLP: satu Year Open (terbaru, atau tahun terbesar di filter), Case Status
+    # Open + Closed. Impact service = Site Status (kolom kedua) "Down".
+    years_ai = [y for y in prepared.get("Access Issue", base)["_year"].unique() if str(y).isdigit()]
+    yr = max(FILTERS["years"]) if FILTERS["years"] else (max(years_ai) if years_ai else None)
+    empty_cols = pd.DataFrame(columns=base.columns)
+    access_y = apply_filters(prepared["Access Issue"], {**tab_filters("Access Issue"), "years": [yr]}) \
+        if "Access Issue" in prepared else empty_cols
+    stolen_y = apply_filters(prepared["Stolen"], {**tab_filters("Stolen"), "years": [yr]}) \
+        if "Stolen" in prepared else empty_cols
+    stolen_y = stolen_y[stolen_y["_has_tt"]] if len(stolen_y) else stolen_y
+    imp_t = impact_table(access_y, stolen_y, SOW)
+    rc_base = access_y[access_y["_impact"]] if len(access_y) else access_y
+    # Top Cause / Root Cause tab mengikuti semua filter (kolom Problem Type & Case di List Access Issue).
+    access_rc = apply_filters(prepared["Access Issue"], FILTERS) if "Access Issue" in prepared else empty_cols
 
-    def grafik1() -> go.Figure:
-        imp_rows = access_f[access_f["_impact"] & access_f["_status"].isin(["Open", "Closed"])]
-        owner_vc = imp_rows["_owner"].value_counts()
-        owner_vc = owner_vc[owner_vc.index != "(Kosong)"]
-        groups = imp_rows.groupby("_owner")["_toco"].agg(lambda g: " / ".join(g.value_counts().index))
-        sel = st.multiselect("Site Owner", list(owner_vc.index), key="g1_owner", placeholder="Semua Site Owner",
-                             format_func=lambda o: f"{o} → {groups.get(o, '-')} ({fmt(owner_vc.get(o))} TT)",
-                             help="Site Owner dikelompokkan ke grup ToCo (kolom GROUP1). Grafik menampilkan "
-                                  "Top 4 grup dengan Total TT Impact Service Released terbanyak.")
-        return impact_donut(impact_by_group(access_f, sel, 4))
+    def g_ltoa() -> go.Figure:
+        tt = imp_t["Total TT Impact Service Released"]
+        tt = tt[tt > 0].sort_values(ascending=False)
+        opts = list(tt.index)
+        sel = st.multiselect("ToCo", opts, default=[t for t in ["PTI", "DMT", "TBG", "CMI"] if t in opts],
+                             key="ltoa_toco", placeholder="Pilih ToCo…",
+                             format_func=lambda t: f"{t} ({fmt(tt.get(t))} TT)",
+                             help="ToCo = kolom GROUP1 (List Access Issue). Nilai = Total TT Impact Service Released.")
+        return ltoa_pie(tt.reindex(sel).dropna())
 
-    def grafik4() -> go.Figure:
-        owner_vc = access_rc["_owner"].value_counts()
-        owner_vc = owner_vc[owner_vc.index != "(Kosong)"]
-        groups = access_rc.groupby("_owner")["_toco"].agg(lambda g: " / ".join(g.value_counts().index))
-        sel = st.multiselect("Site Owner", list(owner_vc.index), key="g4_owner", placeholder="Semua Site Owner",
-                             format_func=lambda o: f"{o} → {groups.get(o, '-')} ({fmt(owner_vc.get(o))} TT)",
-                             help="Pilih Site Owner untuk melihat Top 5 root cause (kolom Case) miliknya.")
-        src = access_rc[access_rc["_owner"].isin(sel)] if sel else access_rc
-        return root_cause_pie(src, 380)
+    def g_impact() -> go.Figure:
+        opts = [t for t in imp_t.index if (imp_t.loc[t, "SoW (A)"] or 0) > 0]
+        if not opts:
+            return empty_fig("SoW (A) belum tersedia.")
+        t = st.selectbox("ToCo", opts, index=opts.index("TBG") if "TBG" in opts else 0, key="imp_toco")
+        row = imp_t.loc[t]
+        st.caption(f"**{t}** · SoW (A) {fmt(row['SoW (A)'])} · Total TT Impact Service Released "
+                   f"{fmt(row['Total TT Impact Service Released'])} · Total Sites Impact Service (B) "
+                   f"{fmt(row['Total Sites Impact Service (B)'])} · % (B/A) {pct(row['% (B/A)'], 2)}")
+        return share_pie({"SoW (A)": row["SoW (A)"],
+                          "Total Sites Impact Service (B)": row["Total Sites Impact Service (B)"]}, [MAGENTA, TOSCA])
 
-    section("Impact Service & SoW per ToCo")
-    tlp_opts = [t for t in imp_t.index if pd.notna(imp_t.loc[t, "SoW (A)"])] or list(imp_t.index)
-    target = st.selectbox("TLP yang dituju (grafik SoW)", tlp_opts, key="target_tlp",
-                          index=tlp_opts.index("TBG") if "TBG" in tlp_opts else 0) if tlp_opts else None
+    def g_root() -> go.Figure:
+        g_vc = rc_base["_toco_raw"].value_counts()
+        g_vc = g_vc[g_vc.index != "(Kosong)"]
+        sel = st.multiselect("GROUP1", list(g_vc.index), key="rc_group1", placeholder="Semua GROUP1",
+                             format_func=lambda g: f"{g} ({fmt(g_vc.get(g))} TT)")
+        src = rc_base[rc_base["_toco_raw"].isin(sel)] if sel else rc_base
+        blank = int((src["_has_tt"] & (src["_root"] == "(Kosong)")).sum())
+        if blank:
+            st.caption(f"{fmt(blank)} TT dengan kolom Case kosong tidak dihitung.")
+        return root_cause_pie(src, 7)
+
+    def g_stolen() -> go.Figure:
+        o_vc = stolen_y["_owner"].value_counts() if len(stolen_y) else pd.Series(dtype=int)
+        o_vc = o_vc[o_vc.index != "(Kosong)"]
+        opts = list(o_vc.index)
+        if not opts:
+            return empty_fig("Tidak ada TT stolen pada filter ini.")
+        default = next((o for o in opts if "tower bersama" in o.lower()), opts[0])
+        sel = st.selectbox("ToCo Owner", opts, index=opts.index(default), key="stl_owner",
+                           format_func=lambda o: f"{o} ({fmt(o_vc.get(o))} TT)",
+                           help="Dari kolom Toco Owner di sheet List Stolen.")
+        code = toco_code(sel)
+        sow = SOW.get(code)
+        own = stolen_y[stolen_y["_owner"] == sel]
+        sites = own.loc[own["_site"] != "", "_site"].nunique()
+        if not sow:
+            return empty_fig(f"SoW (A) untuk {code} belum diisi — atur di tabel SoW.")
+        st.caption(f"ToCO **{code}** · SoW (A) {fmt(sow)} · Total Sites Stolen {fmt(sites)} (IOH ID unik) · "
+                   f"{fmt(len(own))} TT IOH")
+        return share_pie({"SoW (A)": sow, "Total Sites Stolen": sites}, [MAGENTA, TOSCA])
+
+    section(f"Impact Service, Root Cause & Stolen · Year Open {yr}")
     a, b = st.columns(2)
     with a:
-        chart_card("g1", "Grafik 1", MAGENTA, "Impact Service Terbanyak per ToCo · Top 4 (Total TT Released)",
-                   grafik1, EXPORTS)
+        chart_card("ltoa", "PIE 3D", MAGENTA, f"LTOA & Cell Down Contribution {yr}", g_ltoa, EXPORTS)
     with b:
-        chart_card("g4", "Grafik 4", GOLD, "The Root Cause · Top 5 (kolom Case)", grafik4, EXPORTS)
+        chart_card("impact", "PIE 3D", TOSCA, "Access Issue Impact Service", g_impact, EXPORTS, pie_labels="percent")
     a, b = st.columns(2)
-    if target is not None:
-        row = imp_t.loc[target]
-        with a:
-            chart_card("g2", "Grafik 2", TOSCA, f"Access Issue Impact Service · {target}",
-                       sow_pie(row["SoW (A)"], row["Total Sites Impact Service (B)"],
-                               "Total Sites Impact Service (B)", TOSCA), EXPORTS,
-                       table=pd.DataFrame({"Nilai": [row["SoW (A)"], row["Total Sites Impact Service (B)"],
-                                                     row["Total TT Impact Service Released"], row["% (B/A)"]]},
-                                          index=pd.Index(["SoW (A)", "Total Sites Impact Service (B)",
-                                                          "Total TT Impact Service Released", "% (B/A)"],
-                                                         name=target)),
-                       pie_labels="percent")
-            st.caption(f"% (B/A) = **{pct(row['% (B/A)'], 2)}** · SoW (A) {fmt(row['SoW (A)'])} site · "
-                       f"{fmt(row['Total TT Impact Service Released'])} TT impact service released")
-        with b:
-            chart_card("g3", "Grafik 3", RED, f"Stolen Issue · {target}",
-                       sow_pie(row["SoW (A)"], row["Total Sites Stolen"], "Total Sites Stolen", TOSCA), EXPORTS,
-                       table=pd.DataFrame({"Nilai": [row["SoW (A)"], row["Total Sites Stolen"], row["Total TT Stolen"],
-                                                     row["% Stolen / SoW"]]},
-                                          index=pd.Index(["SoW (A)", "Total Sites Stolen", "Total TT Stolen",
-                                                          "% Stolen / SoW"], name=target)),
-                       pie_labels="percent")
-            st.caption(f"% Stolen / SoW = **{pct(row['% Stolen / SoW'], 2)}** · "
-                       f"{fmt(row['Total TT Stolen'])} TT stolen")
+    with a:
+        chart_card("root", "PIE 3D", GOLD, "The Root Cause · Top 7 (kolom Case)", g_root, EXPORTS)
+    with b:
+        chart_card("stolen", "PIE 3D", RED, "Stolen Issue", g_stolen, EXPORTS, pie_labels="percent")
+    st.caption(f"Year Open {yr}, Case Status Open + Closed. Total TT Impact Service Released = jumlah TT Site Status "
+               "Down per ToCo (GROUP1); Total Sites Impact Service (B) = jumlah Site ID unik dari TT tersebut. "
+               "The Root Cause = Count of Huawei TT per kolom Case (Site Status Down). Stolen = jumlah IOH ID unik "
+               "(Count of TT IOH) per Toco Owner. Persen pie = bagian dari jumlah irisan.")
 
-    EXTRA_TABLES["Impact Service & SoW per ToCo"] = imp_t
-    with st.expander("📋 Tabel Impact Service & SoW per ToCo (SoW bisa disunting)"):
-        st.caption("SoW (A) dibaca dari sheet *performance access* bila ada; selebihnya nilai cadangan. "
+    EXTRA_TABLES[f"Impact Service & SoW per ToCo {yr}"] = imp_t
+    with st.expander(f"📋 Tabel Impact Service & SoW per ToCo · {yr} (SoW bisa disunting)"):
+        st.caption("SoW (A) dibaca dari sheet *LIST SITE* / *performance access* bila ada; selebihnya nilai cadangan. "
                    "Ubah angka di kolom SoW lalu klik **Simpan SoW** — berlaku untuk semua pengguna.")
         edit = imp_t.reset_index()
         edited = st.data_editor(
@@ -1819,22 +1873,6 @@ with tabs[0]:
             save_sow_override({**load_sow_override(), **changed})
             st.toast(f"SoW tersimpan ({len(changed)} ToCo diubah).")
             st.rerun()
-
-    section("Open/Close & MTTR")
-    a, b = st.columns(2)
-    with a:
-        chart_card("oc_region", "PVT-1", MAGENTA, "Open vs Close Ticket per Region", open_close_region(d), EXPORTS)
-    with b:
-        mt_export = mttr_table(access_f).rename(columns={"tt": "Count of Huawei TT",
-                                                         "aging": "Sum of Aging Time (Days)", "mttr": "MTTR (TT ÷ Aging)"})
-        mt_export.index.name = "ToCo"
-        chart_card("mttr_tlp", "PVT-2", YELLOW, "MTTR per ToCo · Count Huawei TT ÷ Sum Aging (Days)",
-                   mttr_group(access_f), EXPORTS, table=mt_export)
-    a, b = st.columns(2)
-    with a:
-        chart_card("monthly", "PVT-3", TOSCA, "Jumlah TT per Bulan Open (Close/Open)", monthly_status(d), EXPORTS)
-    with b:
-        chart_card("cause", "PVT-4", RED, "Top Cause · Problem Type", ranked(access_rc, "_cause", 10, MAGENTA), EXPORTS)
 
 # ---------- Report TT Access (weekly & monthly, mengikuti pivot Excel) ----------
 with tabs[1]:
@@ -1867,6 +1905,13 @@ with tabs[1]:
 
         st.divider()
         section("Monthly Report")
+        trend_section(trend_base("Access Issue"), "rpt", "TT access", "TT access", "_owner", [TEAL, YELLOW, MAGENTA],
+                      11, owner_pick=True)
+        st.caption("Trends/Latest update: Count of Case Status (Open & Closed) per Month Open. A = E bulan sebelumnya, "
+                   "B = TT baru, C = A + B, D = C − E, E = akumulasi TT masih Open; Progress = D ÷ C. "
+                   "ToCo Basis = kolom Site Owner.")
+        st.divider()
+        section("Monthly Report · Year Open")
         mon = rpt if FILTERS["years"] else rpt[rpt["_year"] == rpt["_year"].max()]
         if FILTERS["months"]:
             mon = mon[mon["_month"].isin(FILTERS["months"])]
@@ -1935,46 +1980,24 @@ with tabs[2]:
                    "Time To Resolved = Meet SLA ÷ TT Closed; Site Security = TT Problem type *Stolen Case* ÷ "
                    "Total Site (sheet Site).")
 
-# ---------- Trend A–E ----------
+# ---------- Stolen Issue ----------
 with tabs[3]:
-    months_sel = sorted(dim["_period"].unique())
-    labels_m = [p.strftime("%b_%Y") for p in months_sel]
-    if labels_m:
-        m_from, m_to = st.select_slider("Periode grafik A–E (bulan open)", options=labels_m,
-                                        value=(labels_m[max(0, len(labels_m) - 13)], labels_m[-1]), key="ae_range")
-        win = months_sel[labels_m.index(m_from): labels_m.index(m_to) + 1]
-        t = backlog_summary(dim[dim["_period"].between(win[0], win[-1])], win)
-        chart_card("ae", "A–E", MAGENTA, f"Trend TT {cat_title} · {m_from} – {m_to}", summary_chart(t), EXPORTS,
-                   table=t.rename(columns={k: v[0] for k, v in SERIES.items()}))
-        chart_card("progress", "%", TOSCA, f"Progress & Remaining TT {cat_title}", progress_chart(t), EXPORTS,
-                   table=t[["Progress (%)", "Remaining (%)"]])
-        with st.expander("Tabel summary A–E"):
-            st.dataframe(t.rename(columns={k: v[0] for k, v in SERIES.items()}), width="stretch",
-                         column_config={"Progress (%)": st.column_config.NumberColumn(format="%.1f%%"),
-                                        "Remaining (%)": st.column_config.NumberColumn(format="%.1f%%")})
-        st.caption("Grafik A–E mengikuti filter di atas kecuali Status & Bulan; TT Cancel tidak dihitung.")
+    if "Stolen" not in prepared:
+        st.info("Sheet List Stolen tidak tersedia.")
     else:
-        st.info("Tidak ada data bulan untuk filter ini.")
+        trend_section(trend_base("Stolen"), "stl", "TT stolen issue", "TT stolen", "_toco_raw", [MAGENTA, TEAL], 9,
+                      closed_mode=True)
+        st.caption("Sumber: sheet List Stolen, Count of TT IOH per Month Open, Status TT ToCo/OpCo Open & Closed. "
+                   "ToCo Basis = kolom Toco Group Name (total periode & jumlah Closed).")
 
-# ---------- MTTR ----------
+# ---------- CME ----------
 with tabs[4]:
-    chart_card("mttr_tlp2", "MTTR", YELLOW, "MTTR per ToCo · Count Huawei TT ÷ Sum Aging (Days)",
-               mttr_group(access_f, 400))
-    with st.expander("Tabel MTTR per ToCo"):
-        mt = mttr_table(access_f).rename(columns={"tt": "Count of Huawei TT", "aging": "Sum of Aging Time (Days)",
-                                                  "mttr": "MTTR (TT ÷ Aging)"})
-        mt.index.name = "ToCo"
-        st.dataframe(mt, width="stretch", column_config={
-            "Sum of Aging Time (Days)": st.column_config.NumberColumn(format="%.1f"),
-            "MTTR (TT ÷ Aging)": st.column_config.NumberColumn(format="%.2f")})
-    st.caption("Per grup ToCo (TT impact service: Site Status Down, Case Status Open/Closed): Total TT = Count of "
-               "Huawei TT; MTTR = Count of Huawei TT ÷ Sum of Aging Time (Days). Grup dengan Sum Aging 0 "
-               "tidak bisa dibagi sehingga tidak tampil di grafik MTTR.")
-    a, b = st.columns(2)
-    with a:
-        chart_card("mttr_region", "MTTR", ORANGE, "Average MTTR (Days) per Region", mttr_by(d, "_region"))
-    with b:
-        chart_card("mttr_cause", "MTTR", MAGENTA, "Average MTTR (Days) per Cause", mttr_by(d, "_cause"))
+    if "TT CME" not in prepared:
+        st.info("Sheet TT CME tidak tersedia.")
+    else:
+        trend_section(trend_base("TT CME"), "cme", "TT CME", "TT CME", "_owner", [TEAL, YELLOW, MAGENTA], 10)
+        st.caption("Sumber: sheet TT CME, Count of TT Number per Create Month, STATUS TT TLP Open & Close, "
+                   f"Backlog = {', '.join(tab_filters('TT CME')['backlog'])}. ToCo Basis = kolom Owner.")
 
 # ---------- Jumlah TT ----------
 with tabs[5]:
@@ -2011,9 +2034,10 @@ with tabs[5]:
 with tabs[6]:
     a, b = st.columns(2)
     with a:
-        chart_card("root_pie", "TOP 5", GOLD, "The Root Cause · Top 5 (kolom Case)", root_cause_pie(access_rc, 440))
+        chart_card("root_pie", "TOP 7", GOLD, f"The Root Cause · Top 7 (kolom Case, Site Status Down, {yr})",
+                   root_cause_pie(rc_base, 7, 440))
     with b:
-        roots = access_rc.loc[access_rc["_root"] != "(Kosong)", "_root"].value_counts()
+        roots = rc_base.loc[rc_base["_has_tt"] & (rc_base["_root"] != "(Kosong)"), "_root"].value_counts()
         tbl = roots.rename("Total").to_frame()
         tbl.index.name = "The Root Cause"
         EXTRA_TABLES["The Root Cause (kolom Case)"] = tbl
@@ -2021,7 +2045,7 @@ with tabs[6]:
             st.markdown("<div class='ctitle'><span class='badge' style='--c:#B88A00'>TABEL</span>"
                         "The Root Cause</div>", unsafe_allow_html=True)
             st.dataframe(tbl, width="stretch", height=400)
-            blank = int((access_rc["_root"] == "(Kosong)").sum())
+            blank = int((rc_base["_has_tt"] & (rc_base["_root"] == "(Kosong)")).sum())
             if blank:
                 st.caption(f"{fmt(blank)} TT tidak memiliki isian root cause (kolom Case kosong).")
     a, b = st.columns(2)
@@ -2029,8 +2053,9 @@ with tabs[6]:
         chart_card("cause2", "CAUSE", TOSCA, "Top Cause · Problem Type", ranked(access_rc, "_cause", 12, TOSCA, 420))
     with b:
         chart_card("cause_pareto", "CAUSE", PURPLE, "Pareto Cause · Problem Type", pareto(access_rc, "_cause", 12))
-    st.caption("The Root Cause diambil dari kolom **Case** di sheet List Access Issue (mengikuti semua filter). "
-               "Top Cause & Pareto Cause dihitung dari kolom **Problem Type** di sheet List Access Issue.")
+    st.caption(f"The Root Cause = Count of Huawei TT per kolom **Case** (List Access Issue, Site Status Down, "
+               f"Year Open {yr}, Case Status Open & Closed). Top Cause & Pareto Cause dari kolom **Problem Type** "
+               "(mengikuti semua filter).")
 
 # ---------- Data Explorer ----------
 with tabs[7]:
@@ -2058,8 +2083,7 @@ xlsx_slot.download_button(
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", width="stretch",
     help="Tabel angka perhitungan setiap grafik (satu sheet per grafik) sesuai filter saat ini")
 
-ppt_sig = "|".join(str(x) for x in [current_sig, filter_desc] + [st.session_state.get(k) for k in
-                                    ("target_tlp", "ae_range", "g1_owner", "g4_owner")])
+ppt_sig = "|".join(str(x) for x in [current_sig, filter_desc] + [st.session_state.get(k) for k in WIDGET_KEYS])
 if st.session_state.get("pptx_sig") != ppt_sig:
     st.session_state.pop("pptx_bytes", None)
 if "pptx_bytes" in st.session_state:
