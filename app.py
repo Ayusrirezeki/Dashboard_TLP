@@ -227,6 +227,11 @@ st.markdown(f"""
                  background:linear-gradient({MAGENTA},{YELLOW});}}
   [class*="st-key-card_"] {{background:{CARD}; border:1px solid {BORDER} !important;
                             border-radius:14px; padding:12px 14px 6px; box-shadow:{SHADOW};}}
+  /* Kartu berdampingan dibuat sama tinggi (border rata). */
+  [data-testid="stHorizontalBlock"] {{align-items:stretch;}}
+  [data-testid="stColumn"] > [data-testid="stVerticalBlock"] {{height:100%;}}
+  [data-testid="stColumn"] [data-testid="stLayoutWrapper"]:has(> [class*="st-key-card_"]) {{flex:1 1 auto;}}
+  [data-testid="stColumn"] [class*="st-key-card_"] {{height:100%;}}
   .ctitle {{font-size:.95rem; font-weight:700; color:{TEXT}; margin:2px 0 4px;}}
   .badge {{display:inline-block; font-size:.66rem; font-weight:700; padding:2px 7px; border-radius:6px;
            margin-right:8px; vertical-align:middle; color:var(--c); border:1px solid var(--c);
@@ -562,7 +567,8 @@ def prepare_sites(_df: pd.DataFrame) -> pd.DataFrame:
     pm_col = _pm_column(_df)
     df = pd.DataFrame({"_owner_raw": _col(_df, "Owner"), "_region": _col(_df, "Region"),
                        "_pm": _col(_df, pm_col, "").str.upper().str.split().str.join(" "),
-                       "_stype": _col(_df, _first(_df, ["Site Type", "Site type", "SITE TYPE"]), "").str.upper(),
+                       "_stype": _col(_df, next((c for c in _df.columns if c.strip().lower() == "site type"), None), "")
+                       .str.upper(),
                        "_site": _col(_df, "IOH ID", "")})
     others = df["_owner_raw"].str.lower().str.contains("other")
     df["_toco"] = df["_owner_raw"].map(toco_code).where(~others, "OTHERS")
@@ -1004,8 +1010,10 @@ def trend_chart(t: pd.DataFrame) -> go.Figure:
                              marker=dict(symbol="line-ew", size=26, color=color, line=dict(color=color, width=6)),
                              hovertemplate=f"{name}: %{{y:,.0f}}<extra></extra>"))
     dark(fig, 440)
-    fig.update_layout(barmode="group", bargap=0.2, bargroupgap=0.04, hovermode="x unified", margin=dict(t=72),
-                      legend=dict(x=0, xanchor="left", y=1.02, entrywidth=330, entrywidthmode="pixels"),
+    # Legenda 2 baris (3 + 2 entri) di atas area plot; margin atas cukup agar tidak menimpa batang.
+    fig.update_layout(barmode="group", bargap=0.2, bargroupgap=0.04, hovermode="x unified", margin=dict(t=96),
+                      legend=dict(x=0, xanchor="left", y=1.0, yanchor="bottom", entrywidth=0.33,
+                                  entrywidthmode="fraction"),
                       yaxis=dict(tickformat=",.0f", title=dict(text="TT Released", font=dict(color=MUTED))),
                       xaxis=dict(showgrid=False, tickangle=-30 if len(x) > 10 else 0))
     return fig
@@ -1327,9 +1335,9 @@ def coupa_chart(pc: pd.DataFrame) -> go.Figure:
                              textposition="outside", textangle=-90, textfont=dict(size=10, color=TEXT_2),
                              cliponaxis=False, hovertemplate=f"<b>%{{x}}</b><br>{name}: %{{y:.2f}}%<extra></extra>"))
     dark(fig, 520, legend_top=False)
-    fig.update_layout(barmode="group", bargroupgap=0.04, margin=dict(t=70, b=8),
-                      legend=dict(orientation="h", x=0.5, xanchor="center", y=1.02, yanchor="bottom",
-                                  font=dict(size=10)),
+    fig.update_layout(barmode="group", bargroupgap=0.04, margin=dict(t=110, b=8),
+                      legend=dict(orientation="h", x=0, xanchor="left", y=1.0, yanchor="bottom",
+                                  entrywidth=0.33, entrywidthmode="fraction", font=dict(size=10)),
                       yaxis=dict(range=[0, 125], ticksuffix="%", tickformat=".0f"), xaxis=dict(showgrid=False))
     return fig
 
