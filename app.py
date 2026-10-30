@@ -30,24 +30,6 @@ import streamlit as st
 # set_page_config harus menjadi perintah Streamlit pertama dan hanya dipanggil sekali.
 st.set_page_config(page_title="TLP Dashboard", page_icon="📊", layout="wide",
                    initial_sidebar_state="collapsed")
-
-import html  # noqa: E402
-import io  # noqa: E402
-import json  # noqa: E402
-import os  # noqa: E402
-import re  # noqa: E402
-import time  # noqa: E402
-from datetime import datetime  # noqa: E402
-from pathlib import Path  # noqa: E402
-
-import pandas as pd  # noqa: E402
-import plotly.graph_objects as go  # noqa: E402
-from pyxlsb import open_workbook  # noqa: E402
-
-# =====================================================================================
-# Konstanta
-# =====================================================================================
-
 st.markdown(f"""
 <style>
   .stApp {{background:#ffffff;}}
@@ -67,6 +49,23 @@ st.markdown(f"""
   /* ... (lanjutan gaya CSS Anda) */
 </style>
 """, unsafe_allow_html=True)
+
+import html  # noqa: E402
+import io  # noqa: E402
+import json  # noqa: E402
+import os  # noqa: E402
+import re  # noqa: E402
+import time  # noqa: E402
+from datetime import datetime  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+import pandas as pd  # noqa: E402
+import plotly.graph_objects as go  # noqa: E402
+from pyxlsb import open_workbook  # noqa: E402
+
+# =====================================================================================
+# Konstanta
+# =====================================================================================
 
 APP_DIR = Path(__file__).resolve().parent
 SHARED_DIR = APP_DIR / "shared_data"
