@@ -56,7 +56,7 @@ LOCK_FILE = SHARED_DIR / "upload.lock"
 SOW_FILE = SHARED_DIR / "sow_override.json"
 LOCK_TIMEOUT_S = 180       # lock unggahan dianggap basi setelah 3 menit
 REFRESH_EVERY = "15s"      # interval cek data baru untuk auto-refresh semua pengguna
-PREP_VERSION = 6           # naikkan bila kolom turunan di prepare() berubah, agar cache lama tidak dipakai
+PREP_VERSION = 7           # naikkan bila kolom turunan di prepare() berubah, agar cache lama tidak dipakai
 
 # Warna khas Indosat di atas latar gelap.
 MAGENTA, YELLOW, RED, TOSCA = "#E20074", "#FFD100", "#ED1C24", "#00A3AD"
@@ -2135,17 +2135,6 @@ with tabs[5]:
         if not has_pm:
             st.caption("Kolom status PM (NY PM / DONE PM) belum ada di sheet LIST SITE file ini — garis Achievement "
                        "dan kolom PM akan terisi otomatis setelah file berisi kolom tersebut diunggah.")
-    a, b = st.columns(2)
-    with a:
-        chart_card("tlp_open", "OPEN", MAGENTA, "TT masih OPEN per TLP",
-                   ranked(d[d["_status"] == "Open"], "_toco", 10, MAGENTA, show_pct=False))
-    with b:
-        if not sites_f.empty:
-            with st.container(key="card_pm_table"):
-                st.markdown(pm_table_html(pm_t, f"PM K2 {yr}"), unsafe_allow_html=True)
-                st.caption("Total site K1 = COUNTIFS(LIST SITE!Owner, TLP); NY PM / Done PM = COUNTIFS(Owner, TLP, "
-                           "status PM, \"NY PM\" / \"DONE PM\"); Achievement = Done PM ÷ Total site K1.")
-
     def g_site_type() -> go.Figure:
         o_vc = SITES["_owner_raw"].value_counts()
         sel = st.multiselect("Owner", list(o_vc.index), key="st_owner", placeholder="(All)",
@@ -2156,10 +2145,21 @@ with tabs[5]:
             EXTRA_TABLES["Site Type per Region"] = tbl
         return fig
 
-    chart_card("site_type", "SITE", TOSCA, "Site Type per Region · Count of IOH ID", g_site_type, EXPORTS)
+    # Grafik berdampingan di atas, tabel ACHIEVEMENT PM selebar halaman di bawah.
+    a, b = st.columns(2)
+    with a:
+        chart_card("tlp_open", "OPEN", MAGENTA, "TT masih OPEN per TLP",
+                   ranked(d[d["_status"] == "Open"], "_toco", 10, MAGENTA, 420, show_pct=False))
+    with b:
+        chart_card("site_type", "SITE", TOSCA, "Site Type per Region · Count of IOH ID", g_site_type, EXPORTS)
     if "Site Type per Region" in EXTRA_TABLES:
         with st.expander("Tabel Site Type per Region"):
             st.dataframe(EXTRA_TABLES["Site Type per Region"], width="stretch")
+    if not sites_f.empty:
+        with st.container(key="card_pm_table"):
+            st.markdown(pm_table_html(pm_t, f"PM K2 {yr}"), unsafe_allow_html=True)
+            st.caption("Total site K1 = COUNTIFS(LIST SITE!Owner, TLP); NY PM / Done PM = COUNTIFS(Owner, TLP, "
+                       "status PM, \"NY PM\" / \"DONE PM\"); Achievement = Done PM ÷ Total site K1.")
 
 # ---------- Root Cause ----------
 with tabs[6]:
