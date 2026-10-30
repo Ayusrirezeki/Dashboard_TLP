@@ -159,13 +159,56 @@ CATEGORIES = {
 REGION_COL = "New Region"
 
 # =====================================================================================
-# Gaya halaman (tema gelap Indosat)
+# Gaya halaman (tema putih Indosat + latar bintang bergerak)
 # =====================================================================================
+
+
+def _star_layer(n: int, tile: int, seed: int, colors: list[str], size: tuple[float, float]) -> str:
+    """Satu lapisan bintang: n titik radial-gradient acak (tetap/deterministik) dalam ubin tile x tile px."""
+    import random
+    rnd = random.Random(seed)
+    dots = []
+    for _ in range(n):
+        r = rnd.uniform(*size)
+        dots.append(f"radial-gradient({r:.1f}px {r:.1f}px at {rnd.randrange(tile)}px {rnd.randrange(tile)}px, "
+                    f"{rnd.choice(colors)}, transparent 70%)")
+    return ", ".join(dots)
+
+
+# Bintang kecil redup (abu-navy) + bintang besar berwarna khas Indosat, di atas latar putih.
+STARS_SMALL = _star_layer(55, 420, 7, ["rgba(26,28,46,.55)", "rgba(61,64,88,.5)", "rgba(107,112,144,.6)"],
+                          (1.0, 1.9))
+STARS_BIG = _star_layer(22, 640, 11, ["rgba(226,0,116,.7)", "rgba(0,163,173,.7)", "rgba(155,61,151,.6)",
+                                      "rgba(255,190,0,.85)"], (1.8, 3.2))
 
 st.markdown(f"""
 <style>
   .stApp {{background:#ffffff;}}
   [data-testid="stHeader"] {{background: transparent;}}
+
+  /* --- Latar luar angkasa: bintang bergerak pelan + bintang jatuh, latar tetap putih --- */
+  [data-testid="stAppViewContainer"] {{background:transparent; position:relative; z-index:1;}}
+  .stApp::before, .stApp::after {{pointer-events:none;}}
+  .stApp::before {{content:""; position:fixed; inset:-700px; z-index:0; opacity:.85;
+                   background-image:{STARS_SMALL}; background-size:420px 420px;
+                   animation:starDrift 140s linear infinite;}}
+  [data-testid="stAppViewContainer"]::before {{content:""; position:fixed; inset:-700px; z-index:-1;
+                   pointer-events:none; background-image:{STARS_BIG}; background-size:640px 640px;
+                   animation:starDriftBig 90s linear infinite, twinkle 4.5s ease-in-out infinite;}}
+  .stApp::after {{content:""; position:fixed; top:6%; left:-12%; width:180px; height:2px; z-index:0;
+                  border-radius:2px; opacity:0;
+                  background:linear-gradient(90deg, rgba(226,0,116,0), rgba(226,0,116,.75), rgba(255,255,255,0));
+                  transform:rotate(18deg); animation:shootingStar 11s ease-in 3s infinite;}}
+  @keyframes starDrift {{from {{transform:translate3d(0,0,0);}} to {{transform:translate3d(420px,420px,0);}}}}
+  @keyframes starDriftBig {{from {{transform:translate3d(0,0,0);}} to {{transform:translate3d(-640px,640px,0);}}}}
+  @keyframes twinkle {{0%,100% {{opacity:.9;}} 50% {{opacity:.45;}}}}
+  @keyframes shootingStar {{0% {{opacity:0; transform:rotate(18deg) translateX(0);}}
+                            4% {{opacity:1;}}
+                            16% {{opacity:0; transform:rotate(18deg) translateX(135vw);}}
+                            100% {{opacity:0; transform:rotate(18deg) translateX(135vw);}}}}
+  @media (prefers-reduced-motion: reduce) {{
+    .stApp::before, .stApp::after, [data-testid="stAppViewContainer"]::before {{animation:none;}}
+  }}
   /* Sembunyikan menu, header, toolbar, footer & status bawaan Streamlit agar dashboard bersih.
      (Badge avatar/logo Streamlit Cloud ada di luar app — hilang dengan link ?embed=true, bukan lewat CSS.) */
   #MainMenu, header, footer, .stDeployButton, [data-testid="stToolbar"], [data-testid="stStatusWidget"],
