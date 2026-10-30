@@ -1958,8 +1958,14 @@ with tabs[0]:
             st.caption(f"{fmt(blank)} TT dengan kolom Case kosong tidak dihitung.")
         return root_cause_pie(src, 7)
 
+    # Pie Stolen murni dari sheet List Stolen: dropdown Toco Owner (kolom Toco Owner), Year Open, Status Open +
+    # Closed. Filter TLP/Cause/Severity global (berasal dari ToCo Access Issue) tidak dipakai di sini.
+    stolen_pie = apply_filters(prepared["Stolen"], {**tab_filters("Stolen"), "years": [yr], "tlp": [], "cause": [],
+                                                    "sev": []}) if "Stolen" in prepared else empty_cols
+    stolen_pie = stolen_pie[stolen_pie["_has_tt"]] if len(stolen_pie) else stolen_pie
+
     def g_stolen() -> go.Figure:
-        o_vc = stolen_y["_owner"].value_counts() if len(stolen_y) else pd.Series(dtype=int)
+        o_vc = stolen_pie["_owner"].value_counts() if len(stolen_pie) else pd.Series(dtype=int)
         o_vc = o_vc[o_vc.index != "(Kosong)"]
         opts = list(o_vc.index)
         if not opts:
@@ -1968,14 +1974,13 @@ with tabs[0]:
         sel = st.selectbox("ToCo Owner", opts, index=opts.index(default), key="stl_owner",
                            format_func=lambda o: f"{o} ({fmt(o_vc.get(o))} TT)",
                            help="Dari kolom Toco Owner di sheet List Stolen.")
-        code = toco_code(sel)
-        sow = SOW.get(code)
-        own = stolen_y[stolen_y["_owner"] == sel]
+        sow = SOW.get(toco_code(sel))  # SoW (A) = Total site milik owner tsb. (LIST SITE / tabel SoW)
+        own = stolen_pie[stolen_pie["_owner"] == sel]
         sites = own.loc[own["_site"] != "", "_site"].nunique()
         if not sow:
-            return empty_fig(f"SoW (A) untuk {code} belum diisi — atur di tabel SoW.")
-        st.caption(f"ToCO **{code}** · SoW (A) {fmt(sow)} · Total Sites Stolen {fmt(sites)} (IOH ID unik) · "
-                   f"{fmt(len(own))} TT IOH")
+            return empty_fig(f"SoW (A) untuk {sel} belum diisi — atur di tabel SoW.")
+        st.caption(f"Toco Owner **{sel}** · SoW (A) {fmt(sow)} · Total Sites Stolen {fmt(sites)} "
+                   f"(IOH ID unik, Count of TT IOH) · {fmt(len(own))} TT IOH")
         return share_pie({"SoW (A)": sow, "Total Sites Stolen": sites}, [MAGENTA, TOSCA])
 
     section(f"Impact Service, Root Cause & Stolen · Year Open {yr}")
