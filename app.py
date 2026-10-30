@@ -56,7 +56,7 @@ LOCK_FILE = SHARED_DIR / "upload.lock"
 SOW_FILE = SHARED_DIR / "sow_override.json"
 LOCK_TIMEOUT_S = 180       # lock unggahan dianggap basi setelah 3 menit
 REFRESH_EVERY = "15s"      # interval cek data baru untuk auto-refresh semua pengguna
-PREP_VERSION = 5           # naikkan bila kolom turunan di prepare() berubah, agar cache lama tidak dipakai
+PREP_VERSION = 6           # naikkan bila kolom turunan di prepare() berubah, agar cache lama tidak dipakai
 
 # Warna khas Indosat di atas latar gelap.
 MAGENTA, YELLOW, RED, TOSCA = "#E20074", "#FFD100", "#ED1C24", "#00A3AD"
@@ -545,11 +545,25 @@ def prepare(_df: pd.DataFrame, cat: str) -> pd.DataFrame:
     return df
 
 
+def _pm_column(df: pd.DataFrame) -> str | None:
+    """Kolom status PM di LIST SITE (berisi 'NY PM' / 'DONE PM'; kolom O di Excel), dicari dari isinya."""
+    for c in df.columns:
+        if df[c].astype("string").str.strip().str.upper().isin(["NY PM", "DONE PM"]).any():
+            return c
+    return None
+
+
 def prepare_sites(_df: pd.DataFrame) -> pd.DataFrame:
-    """LIST SITE: kolom Owner -> grup ToCo; 'TLP/MO OTHERS' dipisah sebagai OTHERS."""
+    """LIST SITE: kolom Owner -> grup ToCo; 'TLP/MO OTHERS' dipisah sebagai OTHERS.
+    _pm = status PM (NY PM / DONE PM), _stype = Site Type (MACRO/MICRO/IBC), _site = IOH ID."""
+    cols = ["_owner_raw", "_toco", "_region", "_pm", "_stype", "_site"]
     if _df.empty or "Owner" not in _df.columns:
-        return pd.DataFrame(columns=["_owner_raw", "_toco", "_region"])
-    df = pd.DataFrame({"_owner_raw": _col(_df, "Owner"), "_region": _col(_df, "Region")})
+        return pd.DataFrame(columns=cols)
+    pm_col = _pm_column(_df)
+    df = pd.DataFrame({"_owner_raw": _col(_df, "Owner"), "_region": _col(_df, "Region"),
+                       "_pm": _col(_df, pm_col, "").str.upper().str.split().str.join(" "),
+                       "_stype": _col(_df, _first(_df, ["Site Type", "Site type", "SITE TYPE"]), "").str.upper(),
+                       "_site": _col(_df, "IOH ID", "")})
     others = df["_owner_raw"].str.lower().str.contains("other")
     df["_toco"] = df["_owner_raw"].map(toco_code).where(~others, "OTHERS")
     return df[df["_owner_raw"] != "(Kosong)"]
@@ -752,14 +766,16 @@ def root_cause_pie(d: pd.DataFrame, top: int = 7, height: int = 400) -> go.Figur
                   height=height)
 
 
-def ranked(d: pd.DataFrame, col: str, top: int = 10, color: str = TOSCA, height: int = 360) -> go.Figure:
+def ranked(d: pd.DataFrame, col: str, top: int = 10, color: str = TOSCA, height: int = 360,
+           show_pct: bool = True) -> go.Figure:
     vc = d[col].value_counts().head(top)[::-1]
     if vc.empty:
         return empty_fig("Tidak ada data.", height)
     share = vc / max(len(d), 1) * 100
     fig = go.Figure(go.Bar(
         y=vc.index, x=vc.values, orientation="h", marker_color=color, name="Jumlah TT",
-        text=[f"{fmt(v)}  ({pct(s)})" for v, s in zip(vc.values, share)], textposition="outside",
+        text=[f"{fmt(v)}  ({pct(s)})" if show_pct else fmt(v) for v, s in zip(vc.values, share)],
+        textposition="outside",
         textfont=dict(size=11, color=TEXT_2), cliponaxis=False,
         hovertemplate="<b>%{y}</b><br>%{x:,} TT<extra></extra>"))
     dark(fig, height, legend_top=False)
@@ -1075,6 +1091,108 @@ def basis_chart(ct: pd.DataFrame, colors: list[str], height: int = 380, wrap_w: 
                       yaxis=dict(range=[0, float(ct.to_numpy().max() or 1) * 1.15], tickformat=",.0f"),
                       xaxis=dict(showgrid=False, tickfont=dict(size=10)))
     return fig
+
+
+# ---------- Jumlah TT: Achievement PM & Site Type per Region (sheet LIST SITE) ----------
+
+def pm_table(sites: pd.DataFrame) -> pd.DataFrame:
+    """ACHIEVEMENT PM per TLP: Total site K1 = COUNTIFS(Owner, TLP), NY PM / Done PM = COUNTIFS(Owner, TLP,
+    status, "NY PM"/"DONE PM"), Achievement = Done ÷ Total site K1; + TOTAL, TLP/MO OTHERS, (All Site)."""
+    g = pd.DataFrame({"Total site K1": sites.groupby("_toco").size(),
+                      "NY PM / Walktest": sites[sites["_pm"] == "NY PM"].groupby("_toco").size(),
+                      "Done PM / Walktest": sites[sites["_pm"] == "DONE PM"].groupby("_toco").size()}).fillna(0)
+    main = g.drop(index=["OTHERS"], errors="ignore")
+    order = [t for t in TOCO_ORDER if t in main.index] + sorted(t for t in main.index if t not in TOCO_ORDER)
+    t = main.reindex(order)
+    t.loc["TOTAL"] = main.sum()
+    t.loc["TLP/MO OTHERS"] = g.loc["OTHERS"] if "OTHERS" in g.index else 0
+    t.loc["(All Site)"] = t.loc["TOTAL"] + t.loc["TLP/MO OTHERS"]
+    t = t.astype(int)
+    t["Achievement (%)"] = t["Done PM / Walktest"] / t["Total site K1"].where(t["Total site K1"] > 0) * 100
+    t.index.name = "TLP"
+    return t
+
+
+def _scale_color(v: float) -> str:
+    """Skala 3 warna Excel: 0% merah -> 50% kuning -> 100% hijau."""
+    if pd.isna(v):
+        return "#ffffff"
+    stops = [(0, (248, 105, 107)), (50, (255, 235, 132)), (100, (99, 190, 123))]
+    v = min(max(v, 0), 100)
+    (x0, c0), (x1, c1) = (stops[0], stops[1]) if v <= 50 else (stops[1], stops[2])
+    f = (v - x0) / (x1 - x0)
+    return "#" + "".join(f"{round(a + (b - a) * f):02X}" for a, b in zip(c0, c1))
+
+
+def pm_table_html(t: pd.DataFrame, title: str) -> str:
+    hd = "background:#26B5A7;color:#fff;font-weight:700;padding:6px 8px;border:1px solid #fff;text-align:center"
+    td = "padding:4px 8px;border:1px solid #E3E5EE;text-align:center;font-size:.8rem"
+    head = (f"<tr><th style='{hd};background:#FFFF66;color:{TEXT}' colspan='5'>ACHIEVEMENT PM</th></tr>"
+            f"<tr><th style='{hd}' rowspan='2'>TLP</th><th style='{hd};background:#FF66CC' colspan='4'>{esc(title)}</th></tr>"
+            f"<tr><th style='{hd}'>Total site K1</th><th style='{hd}'>NY PM / Walktest</th>"
+            f"<th style='{hd}'>Done PM / Walktest</th><th style='{hd}'>Achievement</th></tr>")
+    body = ""
+    for name, r in t.iterrows():
+        row_bg = {"TOTAL": "#26B5A7", "TLP/MO OTHERS": "#BFBFBF", "(All Site)": "#E2EFDA"}.get(name, "")
+        weight = "font-weight:800;" if row_bg else ""
+        color = "color:#fff;" if name == "TOTAL" else ""
+        cell = f"{td};{weight}{color}" + (f"background:{row_bg};" if row_bg else "")
+        ach = "" if name == "(All Site)" else pct(r["Achievement (%)"], 2)
+        ach_bg = "" if name == "(All Site)" else f"background:{_scale_color(r['Achievement (%)'])};color:{TEXT};"
+        body += (f"<tr><td style='{cell}'>{esc(name)}</td>"
+                 + "".join(f"<td style='{cell}'>{fmt(r[c])}</td>"
+                           for c in ["Total site K1", "NY PM / Walktest", "Done PM / Walktest"])
+                 + f"<td style='{td};{weight}{ach_bg}'>{ach}</td></tr>")
+    return ("<div style='overflow-x:auto'><table style='border-collapse:collapse;width:100%;font-family:inherit'>"
+            f"{head}{body}</table></div>")
+
+
+def k1_chart(t: pd.DataFrame) -> go.Figure:
+    """Batang Total site K1 per TLP + garis Achievement PM (%) di sumbu kanan."""
+    main = t.drop(index=["TOTAL", "TLP/MO OTHERS", "(All Site)"], errors="ignore")
+    main = main.sort_values("Total site K1", ascending=False)
+    x = [wrap(i) for i in main.index]
+    fig = go.Figure()
+    fig.add_trace(go.Bar(x=x, y=main["Total site K1"], name="Total site K1", marker_color=PURPLE,
+                         text=bar_text(main["Total site K1"]), textposition="outside",
+                         textfont=dict(size=11, color=TEXT_2), cliponaxis=False,
+                         hovertemplate="<b>%{x}</b><br>Total site K1: %{y:,}<extra></extra>"))
+    has_pm = (t["NY PM / Walktest"].sum() + t["Done PM / Walktest"].sum()) > 0
+    if has_pm:
+        fig.add_trace(go.Scatter(x=x, y=main["Achievement (%)"], name="Achievement", yaxis="y2",
+                                 mode="lines+markers+text", text=[pct(v, 1) for v in main["Achievement (%)"]],
+                                 textposition="top center", textfont=dict(size=10, color=GOLD), cliponaxis=False,
+                                 line=dict(color=YELLOW, width=2.5), marker=dict(size=7),
+                                 hovertemplate="<b>%{x}</b><br>Achievement: %{y:.2f}%<extra></extra>"))
+    dark(fig, 420)
+    fig.update_layout(yaxis=dict(range=[0, float(main["Total site K1"].max() or 1) * (2.0 if has_pm else 1.18)]),
+                      yaxis2=dict(overlaying="y", side="right", range=[-60, 112], showgrid=False,
+                                  tickvals=[0, 50, 100], ticksuffix="%", tickfont=dict(color=GOLD)),
+                      xaxis=dict(tickangle=-30 if len(main) > 8 else 0, tickfont=dict(size=10)))
+    return fig
+
+
+def site_type_chart(sites: pd.DataFrame) -> tuple[go.Figure, pd.DataFrame]:
+    """Pivot Count of IOH ID: Region x Site Type (MACRO, MICRO, IBC, ...)."""
+    w = sites[(sites["_site"] != "") & (sites["_stype"] != "")]
+    if w.empty:
+        return empty_fig("Kolom Site Type belum ada / kosong di sheet LIST SITE.", 400), pd.DataFrame()
+    ct = pd.crosstab(w["_region"], w["_stype"])
+    cols = [c for c in ["MACRO", "MICRO", "IBC"] if c in ct.columns] + sorted(c for c in ct.columns
+                                                                            if c not in ("MACRO", "MICRO", "IBC"))
+    ct = ct[cols].sort_index()
+    fig = go.Figure()
+    for i, c in enumerate(cols):
+        fig.add_trace(go.Bar(x=list(ct.index), y=ct[c], name=c, marker_color=EXCEL_COLORS[i % len(EXCEL_COLORS)],
+                             text=_labels(ct[c]), textposition="outside", textangle=-90,
+                             textfont=dict(size=10, color=TEXT_2), cliponaxis=False,
+                             hovertemplate=f"<b>%{{x}}</b><br>{c}: %{{y:,}}<extra></extra>"))
+    dark(fig, 420)
+    fig.update_layout(barmode="group", bargroupgap=0.05,
+                      yaxis=dict(range=[0, float(ct.to_numpy().max() or 1) * 1.2]), xaxis=dict(showgrid=False))
+    out = ct.copy()
+    out["Grand Total"] = out.sum(axis=1)
+    return fig, _with_total_row(out).rename_axis("Region")
 
 
 # TLP yang dinilai di COUPA: nilai kolom TLP2 (spasi dirapikan) -> label kolom tabel.
@@ -1463,7 +1581,7 @@ st.session_state["loaded_sig"] = current_sig
 
 # Dropdown/slider di dalam tab (ikut di-reset & menentukan ulang isi PPT).
 WIDGET_KEYS = ("rpt_weeks", "rpt_range", "rpt_owner", "stl_range", "cme_range", "ltoa_toco", "imp_toco", "rc_group1",
-               "stl_owner")
+               "stl_owner", "st_owner")
 FILTER_KEYS = ("f_cat", "f_year", "f_region", "f_tlp", "f_cause", "f_status", "f_month", "f_sev", "f_backlog", "f_q")
 
 head_l, head_r = st.columns([1.05, 1], vertical_alignment="center")
@@ -2006,29 +2124,42 @@ with tabs[5]:
         sites_f = sites_f[sites_f["_region"].isin(f_region)]
     if f_tlp:
         sites_f = sites_f[sites_f["_toco"].isin(f_tlp)]
-    k1 = sites_f[sites_f["_toco"] != "OTHERS"].groupby("_toco").size()
-    if k1.empty:
-        st.info("Sheet **LIST SITE** tidak ditemukan / kosong — grafik Total site K1 tidak bisa dihitung.")
+    if sites_f.empty:
+        st.info("Sheet **LIST SITE** tidak ditemukan / kosong — Total site K1 & Achievement PM tidak bisa dihitung.")
     else:
-        chart_card("pareto", "PVT-3", PURPLE, "Jumlah Site per TLP · Total site K1 (sheet LIST SITE)",
-                   pareto(None, None, 20, values=k1, name="Total site K1"), EXPORTS)
-        with st.expander("Tabel Total site K1 per TLP"):
-            order = [t for t in TOCO_ORDER if t in k1.index] + [t for t in k1.index if t not in TOCO_ORDER]
-            others = int((sites_f["_toco"] == "OTHERS").sum())
-            rows = [(t, int(k1[t])) for t in order]
-            rows += [("TOTAL", int(k1.sum())), ("TLP/MO OTHERS", others),
-                     ("Total Actual (All Site)", int(k1.sum()) + others)]
-            k1_df = pd.DataFrame(rows, columns=["TLP", "Total site K1"])
-            EXTRA_TABLES["Total site K1 per TLP"] = k1_df.set_index("TLP")
-            st.dataframe(k1_df, hide_index=True, width="stretch")
-            st.caption("Total site K1 = COUNTIFS(LIST SITE!Owner, TLP). Kolom status PM (NY PM / Done PM) belum "
-                       "ada di sheet LIST SITE, sehingga Achievement PM belum bisa dihitung.")
+        pm_t = pm_table(sites_f)
+        has_pm = (pm_t["NY PM / Walktest"].sum() + pm_t["Done PM / Walktest"].sum()) > 0
+        EXTRA_TABLES["Achievement PM"] = pm_t
+        chart_card("pareto", "PVT-3", PURPLE, "Jumlah Site per TLP · Total site K1 & Achievement PM (sheet LIST SITE)",
+                   k1_chart(pm_t), EXPORTS, table=pm_t)
+        if not has_pm:
+            st.caption("Kolom status PM (NY PM / DONE PM) belum ada di sheet LIST SITE file ini — garis Achievement "
+                       "dan kolom PM akan terisi otomatis setelah file berisi kolom tersebut diunggah.")
     a, b = st.columns(2)
     with a:
         chart_card("tlp_open", "OPEN", MAGENTA, "TT masih OPEN per TLP",
-                   ranked(d[d["_status"] == "Open"], "_toco", 10, MAGENTA))
+                   ranked(d[d["_status"] == "Open"], "_toco", 10, MAGENTA, show_pct=False))
     with b:
-        chart_card("tlp_sev", "SEV", TOSCA, "Jumlah TT per Severity", ranked(d, "_sev", 8, TOSCA, 300))
+        if not sites_f.empty:
+            with st.container(key="card_pm_table"):
+                st.markdown(pm_table_html(pm_t, f"PM K2 {yr}"), unsafe_allow_html=True)
+                st.caption("Total site K1 = COUNTIFS(LIST SITE!Owner, TLP); NY PM / Done PM = COUNTIFS(Owner, TLP, "
+                           "status PM, \"NY PM\" / \"DONE PM\"); Achievement = Done PM ÷ Total site K1.")
+
+    def g_site_type() -> go.Figure:
+        o_vc = SITES["_owner_raw"].value_counts()
+        sel = st.multiselect("Owner", list(o_vc.index), key="st_owner", placeholder="(All)",
+                             format_func=lambda o: f"{o} ({fmt(o_vc.get(o))} site)")
+        src = sites_f[sites_f["_owner_raw"].isin(sel)] if sel else sites_f
+        fig, tbl = site_type_chart(src)
+        if not tbl.empty:
+            EXTRA_TABLES["Site Type per Region"] = tbl
+        return fig
+
+    chart_card("site_type", "SITE", TOSCA, "Site Type per Region · Count of IOH ID", g_site_type, EXPORTS)
+    if "Site Type per Region" in EXTRA_TABLES:
+        with st.expander("Tabel Site Type per Region"):
+            st.dataframe(EXTRA_TABLES["Site Type per Region"], width="stretch")
 
 # ---------- Root Cause ----------
 with tabs[6]:
