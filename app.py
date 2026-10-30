@@ -1602,7 +1602,7 @@ st.session_state["loaded_sig"] = current_sig
 
 # Dropdown/slider di dalam tab (ikut di-reset & menentukan ulang isi PPT).
 WIDGET_KEYS = ("rpt_weeks", "rpt_range", "rpt_owner", "stl_range", "cme_range", "ltoa_toco", "imp_toco", "rc_group1",
-               "stl_owner", "st_owner")
+               "stl_group", "st_owner")
 FILTER_KEYS = ("f_cat", "f_year", "f_region", "f_tlp", "f_cause", "f_status", "f_month", "f_sev", "f_backlog", "f_q")
 
 head_l, head_r = st.columns([1.05, 1], vertical_alignment="center")
@@ -1958,28 +1958,28 @@ with tabs[0]:
             st.caption(f"{fmt(blank)} TT dengan kolom Case kosong tidak dihitung.")
         return root_cause_pie(src, 7)
 
-    # Pie Stolen murni dari sheet List Stolen: dropdown Toco Owner (kolom Toco Owner), Year Open, Status Open +
+    # Pie Stolen murni dari sheet List Stolen: dropdown Toco Group Name, Year Open, Status Open +
     # Closed. Filter TLP/Cause/Severity global (berasal dari ToCo Access Issue) tidak dipakai di sini.
     stolen_pie = apply_filters(prepared["Stolen"], {**tab_filters("Stolen"), "years": [yr], "tlp": [], "cause": [],
                                                     "sev": []}) if "Stolen" in prepared else empty_cols
     stolen_pie = stolen_pie[stolen_pie["_has_tt"]] if len(stolen_pie) else stolen_pie
 
     def g_stolen() -> go.Figure:
-        o_vc = stolen_pie["_owner"].value_counts() if len(stolen_pie) else pd.Series(dtype=int)
+        o_vc = stolen_pie["_toco_raw"].value_counts() if len(stolen_pie) else pd.Series(dtype=int)
         o_vc = o_vc[o_vc.index != "(Kosong)"]
         opts = list(o_vc.index)
         if not opts:
             return empty_fig("Tidak ada TT stolen pada filter ini.")
         default = next((o for o in opts if "tower bersama" in o.lower()), opts[0])
-        sel = st.selectbox("ToCo Owner", opts, index=opts.index(default), key="stl_owner",
+        sel = st.selectbox("Toco Group Name", opts, index=opts.index(default), key="stl_group",
                            format_func=lambda o: f"{o} ({fmt(o_vc.get(o))} TT)",
-                           help="Dari kolom Toco Owner di sheet List Stolen.")
-        sow = SOW.get(toco_code(sel))  # SoW (A) = Total site milik owner tsb. (LIST SITE / tabel SoW)
-        own = stolen_pie[stolen_pie["_owner"] == sel]
+                           help="Dari kolom Toco Group Name di sheet List Stolen.")
+        sow = SOW.get(toco_code(sel))  # SoW (A) = Total site grup tsb. (LIST SITE / tabel SoW)
+        own = stolen_pie[stolen_pie["_toco_raw"] == sel]
         sites = own.loc[own["_site"] != "", "_site"].nunique()
         if not sow:
             return empty_fig(f"SoW (A) untuk {sel} belum diisi — atur di tabel SoW.")
-        st.caption(f"Toco Owner **{sel}** · SoW (A) {fmt(sow)} · Total Sites Stolen {fmt(sites)} "
+        st.caption(f"Toco Group Name **{sel}** · SoW (A) {fmt(sow)} · Total Sites Stolen {fmt(sites)} "
                    f"(IOH ID unik, Count of TT IOH) · {fmt(len(own))} TT IOH")
         return share_pie({"SoW (A)": sow, "Total Sites Stolen": sites}, [MAGENTA, TOSCA])
 
@@ -1997,7 +1997,7 @@ with tabs[0]:
     st.caption(f"Year Open {yr}, Case Status Open + Closed. Total TT Impact Service Released = jumlah TT Site Status "
                "Down per ToCo (GROUP1); Total Sites Impact Service (B) = jumlah Site ID unik dari TT tersebut. "
                "The Root Cause = Count of Huawei TT per kolom Case (Site Status Down). Stolen = jumlah IOH ID unik "
-               "(Count of TT IOH) per Toco Owner. Persen pie = bagian dari jumlah irisan.")
+               "(Count of TT IOH) per Toco Group Name (List Stolen). Persen pie = bagian dari jumlah irisan.")
 
     EXTRA_TABLES[f"Impact Service & SoW per ToCo {yr}"] = imp_t
     with st.expander(f"📋 Tabel Impact Service & SoW per ToCo · {yr} (SoW bisa disunting)"):
