@@ -404,7 +404,19 @@ def _extract_sow(rows: list[list]) -> dict[str, float]:
     return out
 
 
-def load_workbook(path: str) -> tuple[dict[str, pd.DataFrame], dict[str, float], pd.DataFrame]:
+COUPA_COLS = ["TLP2", "Site ID", "Status", "Kategori Issue", "SLA", "Problem type", "Weeks", "Region"]
+
+
+def _frame_from_header(rows: list[list], must_have: tuple[str, ...]) -> pd.DataFrame:
+    """Sheet yang header-nya tidak di baris pertama (ada catatan di atas): cari baris header dulu."""
+    for i, row in enumerate(rows[:50]):
+        cells = {" ".join(str(v).split()) for v in row if v not in (None, "")}
+        if all(m in cells for m in must_have):
+            return _rows_to_frame(rows[i:])
+    return pd.DataFrame()
+
+
+def load_workbook(path: str) -> tuple[dict[str, pd.DataFrame], dict[str, float], pd.DataFrame, dict]:
     # Workbook dibuka sekali saja: membuka ulang = membaca ulang shared strings (lambat).
     sheets, sow = {}, {}
     with open_workbook(path) as wb:
@@ -418,7 +430,17 @@ def load_workbook(path: str) -> tuple[dict[str, pd.DataFrame], dict[str, float],
         # Sheet "LIST SITE" (daftar site per TLP) -> Total site K1 = COUNTIFS(Owner, TLP).
         list_site = next((n for n in wb.sheets if n.strip().lower().startswith("list site")), None)
         sites = _rows_to_frame(_sheet_rows(wb, list_site)) if list_site else pd.DataFrame()
-    return sheets, sow, sites
+        # COUPA Report: sheet data TT bulanan ("Data TT Sept 2026", dst.) + sheet "Site" (total site per TLP).
+        coupa: dict = {"tt": pd.DataFrame(), "site": pd.DataFrame(), "tt_sheet": None}
+        tt_sheet = next((n for n in wb.sheets if n.strip().lower().startswith("data tt")), None)
+        if tt_sheet:
+            tt = _frame_from_header(_sheet_rows(wb, tt_sheet), ("TLP2", "Site ID"))
+            coupa["tt"] = tt[[c for c in COUPA_COLS if c in tt.columns]]
+            coupa["tt_sheet"] = tt_sheet
+        site_sheet = next((n for n in wb.sheets if n.strip().lower() == "site"), None)
+        if site_sheet:
+            coupa["site"] = _frame_from_header(_sheet_rows(wb, site_sheet), ("GROUP", "Total Site"))
+    return sheets, sow, sites, coupa
 
 
 # =====================================================================================
@@ -528,14 +550,14 @@ def prepare_sites(_df: pd.DataFrame) -> pd.DataFrame:
 
 
 @st.cache_resource(show_spinner="Membaca file .xlsb (pyxlsb)…", max_entries=1)
-def load_data(signature: str, path: str) -> tuple[dict[str, pd.DataFrame], dict[str, float], pd.DataFrame]:
+def load_data(signature: str, path: str) -> tuple[dict[str, pd.DataFrame], dict[str, float], pd.DataFrame, dict]:
     """Baca + siapkan data sekali per versi file. st.cache_resource membagi objek yang sama ke semua
     pengguna tanpa menyalin (hemat memori — penting di Streamlit Community Cloud yang dibatasi ±1 GB).
     `signature` (path + waktu ubah + ukuran + versi) menjadi kunci: data baru otomatis dibaca ulang dan
     versi lama dibuang (max_entries=1). Jangan mengubah DataFrame hasil fungsi ini di tempat."""
-    sheets, sow, sites = load_workbook(path)
+    sheets, sow, sites, coupa = load_workbook(path)
     prepared = {cat: prepare(sheets.pop(cat), cat) for cat in list(sheets)}
-    return prepared, sow, prepare_sites(sites)
+    return prepared, sow, prepare_sites(sites), coupa
 
 
 def apply_filters(df: pd.DataFrame, f: dict, *, status: bool = True, month: bool = True) -> pd.DataFrame:
@@ -1086,6 +1108,145 @@ def mttr_critical_chart(g: pd.DataFrame) -> go.Figure:
     return fig
 
 
+# TLP yang dinilai di COUPA: nilai kolom TLP2 (spasi dirapikan) -> label kolom tabel.
+COUPA_TLP = {"CMI": "CMI", "MITRATEL": "Mitratel", "PTI": "Protelindo", "PTI - STP": "STP", "TBG": "TBG"}
+COUPA_KPI = [
+    # (no, Question/KPI, bobot, jenis, kategori, kriteria skor 1..4)
+    (1, "TT Handling Completion (Severity Emergency)", 0.20, "handling", "CRITICAL",
+     ["<85% TT Solved", "85% - 90% TT Solved", "91% - 95% TT Solved", ">95% TT Solved"]),
+    (2, "TT Handling Completion (Severity Major)", 0.15, "handling", "MAJOR",
+     ["<70% TT Solved", "70% - 80% TT Solved", "81% - 90% TT Solved", ">90% TT Solved"]),
+    (3, "TT Handling Completion (Severity Minor)", 0.05, "handling", "MINOR",
+     ["<70% TT Solved", "70% - 80% TT Solved", "81% - 90% TT Solved", ">90% TT Solved"]),
+    (4, "Time To Resolved for TT Emergency", 0.25, "ttr", "CRITICAL",
+     ["<70% TT resolved Meet SLA", "70% - 80% TT resolved Meet SLA", "81% - 90% TT resolved Meet SLA",
+      ">90% TT resolved Meet SLA"]),
+    (5, "Time To Resolved for TT Major", 0.15, "ttr", "MAJOR",
+     ["<60% TT resolved Meet SLA", "60% - 70% TT resolved Meet SLA", "71% - 80% TT resolved Meet SLA",
+      ">80% TT resolved Meet SLA"]),
+    (6, "Time To Resolved for TT Minor", 0.05, "ttr", "MINOR",
+     ["<60% TT resolved Meet SLA", "60% - 70% TT resolved Meet SLA", "71% - 80% TT resolved Meet SLA",
+      ">80% TT resolved Meet SLA"]),
+    (7, "Site Security", 0.15, "security", None,
+     [">25% TT stolen Issue of site rented", "16% - 25% TT stolen Issue of site rented",
+      "5% - 15% TT stolen Issue of site rented", "<5% TT stolen Issue of site rented"]),
+]
+
+
+def coupa_score(no: int, v: float) -> int | None:
+    """Skor 1–4 sesuai tabel Scoring (batas atas tiap rentang mengikuti angka di Excel)."""
+    if v is None or pd.isna(v):
+        return None
+    if no == 7:  # makin kecil makin baik
+        return 4 if v < 5 else 3 if v <= 15 else 2 if v <= 25 else 1
+    hi, mid, lo = {1: (95, 90, 85), 2: (90, 80, 70), 3: (90, 80, 70),
+                   4: (90, 80, 70), 5: (80, 70, 60), 6: (80, 70, 60)}[no]
+    return 4 if v > hi else 3 if v > mid else 2 if v >= lo else 1
+
+
+def coupa_overview(tt: pd.DataFrame, site: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.Series]:
+    """Performances Overview: persentase per KPI x TLP, skor 1–4, dan Result = SUMPRODUCT(skor, bobot).
+    - TT Handling Completion = TT Closed ÷ total TT (Count of Site ID) per TLP2 & Kategori Issue.
+    - Time To Resolved = Meet SLA ÷ TT Closed per TLP2 & Kategori Issue.
+    - Site Security = jumlah TT Problem type "Stolen Case" ÷ Total Site (sheet Site) per TLP2."""
+    df = tt.copy()
+    df["_tlp"] = df["TLP2"].astype("string").str.split().str.join(" ").str.upper()
+    df = df[df["_tlp"].isin(COUPA_TLP) & df["Site ID"].notna()]
+    df["_kat"] = df["Kategori Issue"].astype("string").str.strip().str.upper()
+    df["_closed"] = df["Status"].astype("string").str.strip().str.lower().eq("closed")
+    df["_meet"] = df["SLA"].astype("string").str.strip().str.lower().eq("meet sla")
+    df["_stolen"] = df["Problem type"].astype("string").str.strip().str.lower().eq("stolen case")
+    totals = {}
+    if not site.empty:
+        grp = site.iloc[:, 0].astype("string").str.split().str.join(" ").str.upper()
+        totals = dict(zip(grp, pd.to_numeric(site.iloc[:, 1], errors="coerce")))
+    pc = pd.DataFrame(index=[k[1] for k in COUPA_KPI], columns=list(COUPA_TLP.values()), dtype=float)
+    for no, name, _w, kind, kat, _crit in COUPA_KPI:
+        for code, label in COUPA_TLP.items():
+            g = df[df["_tlp"] == code]
+            if kind == "handling":
+                sub = g[g["_kat"] == kat]
+                v = sub["_closed"].mean() * 100 if len(sub) else float("nan")
+            elif kind == "ttr":
+                sub = g[(g["_kat"] == kat) & g["_closed"]]
+                v = sub["_meet"].mean() * 100 if len(sub) else float("nan")
+            else:
+                tot = totals.get(code)
+                v = g["_stolen"].sum() / tot * 100 if tot else float("nan")
+            pc.loc[name, label] = v
+    scores = pd.DataFrame({c: [coupa_score(k[0], pc.loc[k[1], c]) for k in COUPA_KPI] for c in pc.columns},
+                          index=pc.index)
+    weights = pd.Series([k[2] for k in COUPA_KPI], index=pc.index)
+    result = scores.mul(weights, axis=0).sum(min_count=1)
+    return pc, scores, result
+
+
+def coupa_result_color(v) -> str:
+    return "#16A34A" if v >= 4 else "#FFD100" if v >= 3.5 else RED
+
+
+def coupa_table_html(pc: pd.DataFrame, scores: pd.DataFrame, result: pd.Series) -> str:
+    tlps = list(pc.columns)
+    th = "background:#E20074;color:#fff;font-weight:700;padding:6px 8px;border:1px solid #fff;text-align:center"
+    th2 = "background:#00A3AD;color:#fff;font-weight:700;padding:6px 8px;border:1px solid #fff;text-align:center"
+    td = "padding:6px 8px;border:1px solid #E3E5EE;text-align:center;font-size:.82rem"
+    head = (f"<tr><th style='{th}' colspan='2'>KPI: Maintenance</th><th style='{th}' colspan='{len(tlps) + 1}'>Answer"
+            f"</th><th style='{th2}' colspan='{len(tlps)}'>Score</th></tr>"
+            f"<tr><th style='{th}'>No.</th><th style='{th}'>Question/KPI</th>"
+            + "".join(f"<th style='{th}'>{esc(t)} (in %)</th>" for t in tlps)
+            + f"<th style='{th}'>Weighting</th>" + "".join(f"<th style='{th2}'>{esc(t)} (in #)</th>" for t in tlps)
+            + "</tr>")
+    body = ""
+    for no, name, w, *_ in COUPA_KPI:
+        body += (f"<tr><td style='{td}'>{no}</td><td style='{td};text-align:left'>{esc(name)}</td>"
+                 + "".join(f"<td style='{td}'>{pct(pc.loc[name, t], 2)}</td>" for t in tlps)
+                 + f"<td style='{td};font-weight:700'>{pct(w * 100, 1)}</td>"
+                 + "".join(f"<td style='{td};font-weight:700'>{'' if pd.isna(scores.loc[name, t]) else int(scores.loc[name, t])}"
+                           "</td>" for t in tlps) + "</tr>")
+    total_w = sum(k[2] for k in COUPA_KPI) * 100
+    res = "".join(f"<td style='{td};font-weight:800;background:{coupa_result_color(result[t])};"
+                  f"color:{'#1a1c2e' if coupa_result_color(result[t]) == '#FFD100' else '#fff'}'>"
+                  f"{days(result[t])}</td>" for t in tlps)
+    body += (f"<tr><td style='{td}' colspan='{len(tlps) + 2}'></td><td style='{td};font-weight:700'>{pct(total_w, 0)}</td>"
+             f"<td style='{td}' colspan='{len(tlps)}'></td></tr>"
+             f"<tr><td style='{td};text-align:right;font-weight:800' colspan='{len(tlps) + 3}'>Result</td>{res}</tr>")
+    return ("<div style='overflow-x:auto'><table style='border-collapse:collapse;width:100%;font-family:inherit'>"
+            f"{head}{body}</table></div>")
+
+
+def coupa_scoring_html() -> str:
+    th = "background:#16A34A;color:#fff;font-weight:700;padding:6px 8px;border:1px solid #fff;text-align:center"
+    td = "padding:6px 8px;border:1px solid #E3E5EE;text-align:center;font-size:.8rem"
+    head = (f"<tr><th style='{th}'>No.</th><th style='{th}'>Weighting</th><th style='{th}'>Comment</th>"
+            + "".join(f"<th style='{th}'>{i}</th>" for i in range(1, 5)) + "</tr>")
+    body = "".join(f"<tr><td style='{td}'>{no}</td><td style='{td}'>{pct(w * 100, 0)}</td>"
+                   f"<td style='{td}'>{'Based on TT Handling' if kind == 'handling' else 'Based on TT'}</td>"
+                   + "".join(f"<td style='{td}'>{esc(c)}</td>" for c in crit) + "</tr>"
+                   for no, _n, w, kind, _k, crit in COUPA_KPI)
+    return ("<div style='overflow-x:auto'><table style='border-collapse:collapse;width:100%;font-family:inherit'>"
+            f"{head}{body}</table></div>")
+
+
+COUPA_COLORS = ["#5B9BD5", ORANGE, "#A5A5A5", YELLOW, "#4472C4", "#70AD47", "#264478"]
+
+
+def coupa_chart(pc: pd.DataFrame) -> go.Figure:
+    fig = go.Figure()
+    for i, (no, name, *_r) in enumerate(COUPA_KPI):
+        vals = [pc.loc[name, t] for t in pc.columns]
+        fig.add_trace(go.Bar(x=[f"{t} (in %)" for t in pc.columns], y=vals, name=name,
+                             marker_color=COUPA_COLORS[i % len(COUPA_COLORS)],
+                             text=[pct(v, 2) if pd.notna(v) else "" for v in vals],
+                             textposition="outside", textangle=-90, textfont=dict(size=10, color=TEXT_2),
+                             cliponaxis=False, hovertemplate=f"<b>%{{x}}</b><br>{name}: %{{y:.2f}}%<extra></extra>"))
+    dark(fig, 520, legend_top=False)
+    fig.update_layout(barmode="group", bargroupgap=0.04, margin=dict(t=70, b=8),
+                      legend=dict(orientation="h", x=0.5, xanchor="center", y=1.02, yanchor="bottom",
+                                  font=dict(size=10)),
+                      yaxis=dict(range=[0, 125], ticksuffix="%", tickformat=".0f"), xaxis=dict(showgrid=False))
+    return fig
+
+
 def _cw_key(cw: str) -> tuple[int, int]:
     m = re.match(r"(\d{4})\D*CW\s*(\d+)", str(cw), flags=re.I)
     return (int(m.group(1)), int(m.group(2))) if m else (0, 0)
@@ -1402,7 +1563,7 @@ if source_path is None:
     st.stop()
 
 try:
-    prepared, sow_from_file, SITES = load_data(f"{current_sig}:v{PREP_VERSION}", str(source_path))
+    prepared, sow_from_file, SITES, COUPA = load_data(f"{current_sig}:v{PREP_VERSION}", str(source_path))
 except Exception as exc:  # file rusak / bukan xlsb
     st.error(f"Gagal membaca **{source_meta.get('filename')}**: {exc}")
     st.stop()
@@ -1561,7 +1722,8 @@ def insights(d: pd.DataFrame) -> list[tuple[str, str, str]]:
 
 EXPORTS: list[dict] = []                # angka tiap grafik (untuk Export Excel & PPT)
 EXTRA_TABLES: dict[str, pd.DataFrame] = {}  # tabel perhitungan pendukung (hanya Excel)
-tabs = st.tabs(["📊 Executive Summary", "📅 Report TT Access", "📈 Trend A–E", "⏱️ MTTR", "🏢 Jumlah TT",
+tabs = st.tabs(["📊 Executive Summary", "📅 Report TT Access", "📑 COUPA Report", "📈 Trend A–E", "⏱️ MTTR",
+                "🏢 Jumlah TT",
                 "🔎 Root Cause",
                 f"🗂️ Data Explorer ({fmt(len(d))} TT)"])
 
@@ -1747,8 +1909,34 @@ with tabs[1]:
                        "(atau tahun di filter). MTTR di grafik ini = Sum of Aging Time ÷ Count of Huawei TT per GROUP "
                        "untuk Severity CRITICAL (rumus Excel =E118/D118).")
 
-# ---------- Trend A–E ----------
+# ---------- COUPA Report (Performances Overview) ----------
 with tabs[2]:
+    if COUPA["tt"].empty:
+        st.info("Sheet **Data TT …** (mis. *Data TT Sept 2026*) tidak ditemukan di file data — COUPA Report tidak "
+                "bisa dihitung.")
+    else:
+        c_pct, c_score, c_result = coupa_overview(COUPA["tt"], COUPA["site"])
+        section(f"Performances Overview · {COUPA['tt_sheet']}")
+        st.markdown(coupa_table_html(c_pct, c_score, c_result), unsafe_allow_html=True)
+        st.caption("Result = SUMPRODUCT(skor, weighting). Warna Result: hijau = 4,00 · kuning ≥ 3,50 · merah < 3,50.")
+        chart_card("coupa_chart", "COUPA", MAGENTA, "Performances Overview per TLP (in %)", coupa_chart(c_pct),
+                   EXPORTS, table=c_pct.round(2).rename_axis("Question/KPI"))
+        section("Scoring")
+        st.markdown(coupa_scoring_html(), unsafe_allow_html=True)
+        overview = c_pct.round(2).add_suffix(" (in %)").join(c_score.add_suffix(" (in #)"))
+        overview.insert(len(c_pct.columns), "Weighting", [k[2] * 100 for k in COUPA_KPI])
+        overview.loc["Result"] = [None] * (len(c_pct.columns) + 1) + list(c_result.round(2))
+        overview.index.name = "Question/KPI"
+        EXTRA_TABLES["COUPA Performances Overview"] = overview
+        if COUPA["site"].empty:
+            st.warning("Sheet **Site** tidak ditemukan — Site Security tidak bisa dihitung.")
+        st.caption(f"Sumber: sheet *{COUPA['tt_sheet']}* dan *Site*. Hanya TLP2 CMI, MITRATEL, PTI (Protelindo), "
+                   "PTI - STP, dan TBG. TT Handling Completion = TT Closed ÷ total TT per Kategori Issue; "
+                   "Time To Resolved = Meet SLA ÷ TT Closed; Site Security = TT Problem type *Stolen Case* ÷ "
+                   "Total Site (sheet Site).")
+
+# ---------- Trend A–E ----------
+with tabs[3]:
     months_sel = sorted(dim["_period"].unique())
     labels_m = [p.strftime("%b_%Y") for p in months_sel]
     if labels_m:
@@ -1769,7 +1957,7 @@ with tabs[2]:
         st.info("Tidak ada data bulan untuk filter ini.")
 
 # ---------- MTTR ----------
-with tabs[3]:
+with tabs[4]:
     chart_card("mttr_tlp2", "MTTR", YELLOW, "MTTR per ToCo · Count Huawei TT ÷ Sum Aging (Days)",
                mttr_group(access_f, 400))
     with st.expander("Tabel MTTR per ToCo"):
@@ -1789,7 +1977,7 @@ with tabs[3]:
         chart_card("mttr_cause", "MTTR", MAGENTA, "Average MTTR (Days) per Cause", mttr_by(d, "_cause"))
 
 # ---------- Jumlah TT ----------
-with tabs[4]:
+with tabs[5]:
     sites_f = SITES
     if f_region:
         sites_f = sites_f[sites_f["_region"].isin(f_region)]
@@ -1820,7 +2008,7 @@ with tabs[4]:
         chart_card("tlp_sev", "SEV", TOSCA, "Jumlah TT per Severity", ranked(d, "_sev", 8, TOSCA, 300))
 
 # ---------- Root Cause ----------
-with tabs[5]:
+with tabs[6]:
     a, b = st.columns(2)
     with a:
         chart_card("root_pie", "TOP 5", GOLD, "The Root Cause · Top 5 (kolom Case)", root_cause_pie(access_rc, 440))
@@ -1845,7 +2033,7 @@ with tabs[5]:
                "Top Cause & Pareto Cause dihitung dari kolom **Problem Type** di sheet List Access Issue.")
 
 # ---------- Data Explorer ----------
-with tabs[6]:
+with tabs[7]:
     preferred = []
     for c in cats:
         cfg = CATEGORIES[c]
