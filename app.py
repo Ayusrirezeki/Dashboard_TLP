@@ -180,6 +180,16 @@ STARS_SMALL = _star_layer(55, 420, 7, ["rgba(26,28,46,.55)", "rgba(61,64,88,.5)"
                           (1.0, 1.9))
 STARS_BIG = _star_layer(22, 640, 11, ["rgba(226,0,116,.7)", "rgba(0,163,173,.7)", "rgba(155,61,151,.6)",
                                       "rgba(255,190,0,.85)"], (1.8, 3.2))
+# 8 bintang jatuh: (top, left, sudut, durasi siklus, jeda awal, warna, panjang) — jeda berbeda agar bergantian.
+SHOOTING = [("4%", "-12%", 18, 9, 0.5, "226,0,116", 180), ("14%", "8%", 22, 11, 3.0, "0,163,173", 150),
+            ("26%", "-15%", 15, 10, 6.0, "155,61,151", 200), ("8%", "35%", 28, 12, 1.8, "226,0,116", 140),
+            ("38%", "-10%", 20, 13, 8.5, "0,163,173", 170), ("2%", "55%", 32, 10, 4.6, "255,170,0", 130),
+            ("50%", "-14%", 16, 14, 10.5, "226,0,116", 190), ("20%", "70%", 35, 11, 7.2, "155,61,151", 120)]
+SHOOTING_CSS = "\n".join(
+    f"  .shooting-stars span:nth-child({i}) {{top:{t}; left:{l}; width:{w}px; --a:{a}deg; "
+    f"background:linear-gradient(90deg, rgba({c},0), rgba({c},.8), rgba(255,255,255,0)); "
+    f"animation:shootingStar {d}s ease-in {delay}s infinite;}}"
+    for i, (t, l, a, d, delay, c, w) in enumerate(SHOOTING, start=1))
 
 st.markdown(f"""
 <style>
@@ -188,26 +198,26 @@ st.markdown(f"""
 
   /* --- Latar luar angkasa: bintang bergerak pelan + bintang jatuh, latar tetap putih --- */
   [data-testid="stAppViewContainer"] {{background:transparent; position:relative; z-index:1;}}
-  .stApp::before, .stApp::after {{pointer-events:none;}}
+  .stApp::before {{pointer-events:none;}}
   .stApp::before {{content:""; position:fixed; inset:-700px; z-index:0; opacity:.85;
                    background-image:{STARS_SMALL}; background-size:420px 420px;
                    animation:starDrift 140s linear infinite;}}
   [data-testid="stAppViewContainer"]::before {{content:""; position:fixed; inset:-700px; z-index:-1;
                    pointer-events:none; background-image:{STARS_BIG}; background-size:640px 640px;
                    animation:starDriftBig 90s linear infinite, twinkle 4.5s ease-in-out infinite;}}
-  .stApp::after {{content:""; position:fixed; top:6%; left:-12%; width:180px; height:2px; z-index:0;
-                  border-radius:2px; opacity:0;
-                  background:linear-gradient(90deg, rgba(226,0,116,0), rgba(226,0,116,.75), rgba(255,255,255,0));
-                  transform:rotate(18deg); animation:shootingStar 11s ease-in 3s infinite;}}
+  .shooting-stars {{position:fixed; inset:0; z-index:-1; pointer-events:none; overflow:hidden;}}
+  .shooting-stars span {{position:absolute; height:2px; border-radius:2px; opacity:0;
+                         transform:rotate(var(--a)) translateX(0);}}
+{SHOOTING_CSS}
   @keyframes starDrift {{from {{transform:translate3d(0,0,0);}} to {{transform:translate3d(420px,420px,0);}}}}
   @keyframes starDriftBig {{from {{transform:translate3d(0,0,0);}} to {{transform:translate3d(-640px,640px,0);}}}}
   @keyframes twinkle {{0%,100% {{opacity:.9;}} 50% {{opacity:.45;}}}}
-  @keyframes shootingStar {{0% {{opacity:0; transform:rotate(18deg) translateX(0);}}
+  @keyframes shootingStar {{0% {{opacity:0; transform:rotate(var(--a)) translateX(0);}}
                             4% {{opacity:1;}}
-                            16% {{opacity:0; transform:rotate(18deg) translateX(135vw);}}
-                            100% {{opacity:0; transform:rotate(18deg) translateX(135vw);}}}}
+                            18% {{opacity:0; transform:rotate(var(--a)) translateX(120vw);}}
+                            100% {{opacity:0; transform:rotate(var(--a)) translateX(120vw);}}}}
   @media (prefers-reduced-motion: reduce) {{
-    .stApp::before, .stApp::after, [data-testid="stAppViewContainer"]::before {{animation:none;}}
+    .stApp::before, [data-testid="stAppViewContainer"]::before, .shooting-stars span {{animation:none;}}
   }}
   /* Sembunyikan menu, header, toolbar, footer & status bawaan Streamlit agar dashboard bersih.
      (Badge avatar/logo Streamlit Cloud ada di luar app — hilang dengan link ?embed=true, bukan lewat CSS.) */
@@ -284,6 +294,7 @@ st.markdown(f"""
            margin-right:8px; vertical-align:middle; color:var(--c); border:1px solid var(--c);
            background:color-mix(in srgb, var(--c) 14%, transparent);}}
 </style>
+<div class="shooting-stars">{"<span></span>" * len(SHOOTING)}</div>
 """, unsafe_allow_html=True)
 
 
