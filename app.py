@@ -56,7 +56,7 @@ LOCK_FILE = SHARED_DIR / "upload.lock"
 SOW_FILE = SHARED_DIR / "sow_override.json"
 LOCK_TIMEOUT_S = 180       # lock unggahan dianggap basi setelah 3 menit
 REFRESH_EVERY = "15s"      # interval cek data baru untuk auto-refresh semua pengguna
-PREP_VERSION = 3           # naikkan bila kolom turunan di prepare() berubah, agar cache lama tidak dipakai
+PREP_VERSION = 4           # naikkan bila kolom turunan di prepare() berubah, agar cache lama tidak dipakai
 
 # Warna khas Indosat di atas latar gelap.
 MAGENTA, YELLOW, RED, TOSCA = "#E20074", "#FFD100", "#ED1C24", "#00A3AD"
@@ -454,6 +454,15 @@ def _first(df: pd.DataFrame, names: list[str]) -> str | None:
     return next((n for n in names if n in df.columns and df[n].notna().any()), None)
 
 
+GROUP_ORDER = ["PTI", "DMT", "CMI", "TBG", "Others"]
+
+
+def group_label(name) -> str:
+    """Kolom GROUP (PTI - Group, DAYAMITRA..., CMI - Group, TOWER BERSAMA, PT, OTHERS) -> label singkat."""
+    code = toco_code(name)
+    return code if code in GROUP_ORDER else "Others"
+
+
 def _unify_case(s: pd.Series) -> pd.Series:
     """Samakan ejaan yang hanya beda huruf besar/kecil (Dhost/DHOST/DHost) ke ejaan terbanyak."""
     key = s.str.lower()
@@ -495,6 +504,11 @@ def prepare(_df: pd.DataFrame, cat: str) -> pd.DataFrame:
     df["_site"] = _col(df, cfg["site_id"], "")
     # Baris yang punya nomor TT (mis. "Count of Huawei TT" di pivot); tanpa kolom TT, semua baris dihitung.
     df["_has_tt"] = _col(df, cfg.get("tt"), "").ne("") if cfg.get("tt") in df.columns else True
+    # Kolom untuk tab Report TT Access (pivot mingguan/bulanan seperti di Excel).
+    df["_cw"] = _col(df, "CW Open", "")
+    df["_sla"] = _col(df, "SLA")
+    df["_sitecat"] = _col(df, "Site Category").str.upper()
+    df["_grp"] = _col(df, "GROUP").map(group_label)
     impact_col = _first(df, cfg["impact"])
     df["_impact"] = _col(df, impact_col, "").str.lower().eq("down") if impact_col else False
     present = [c for c in cfg["search"] if c in df.columns]
@@ -934,8 +948,11 @@ def fig_export(fig: go.Figure) -> dict | None:
                            color=None if many else color, colors=(list(color)[::-1] if horiz else list(color))
                            if many else None,
                            # garis kumulatif % (skala lain) hanya masuk tabel, tidak digambar di PPT
-                           chart="kumulatif" not in (t.name or "").lower()))
+                           chart=not ("kumulatif" in (t.name or "").lower()
+                                      or (t.type == "scatter" and (t.name or "") in ("Grand Total", "MTTR (hari)")))))
+    stacked_area = any(t.type == "scatter" and t.stackgroup for t in traces)
     kind = ("bar_h" if horiz else "column_stacked_100" if fig.layout.barnorm == "percent"
+            else "column_stacked" if stacked_area
             else "column_stacked" if fig.layout.barmode == "stack" else "column_clustered")
     return dict(kind=kind, categories=cats[::-1] if horiz else cats, series=series,
                 pct=fig.layout.yaxis.ticksuffix == "%")
@@ -948,6 +965,130 @@ def spec_table(spec: dict) -> pd.DataFrame:
         total = df.iloc[:, 0].sum()
         df["%"] = (df.iloc[:, 0] / total * 100).round(2) if total else None
     return df
+
+
+GROUP_COLORS = {"PTI": MAGENTA, "DMT": TOSCA, "CMI": YELLOW, "TBG": RED, "Others": PURPLE}
+SLA_COLORS = {"Exceed SLA": MAGENTA, "Meet SLA": TOSCA}
+SEV_COLORS = {"CRITICAL": MAGENTA, "MAJOR": TOSCA}
+HUB_COLORS = {"BIG HUB SITE": MAGENTA, "MEDIUM HUB SITE": TOSCA}
+
+
+def pivot_tt(df: pd.DataFrame, row: str, col: str, rows: list, cols: list) -> pd.DataFrame:
+    """Pivot Count of Huawei TT (baris x kolom) + Grand Total, urutan baris/kolom ditentukan."""
+    ct = df[df["_has_tt"]].groupby([row, col]).size().unstack(fill_value=0)
+    ct = ct.reindex(index=rows, columns=cols, fill_value=0)
+    ct["Grand Total"] = ct.sum(axis=1)
+    return ct
+
+
+def _labels(vals) -> list[str]:
+    return [fmt(v) if v else "" for v in vals]
+
+
+def sla_area(ct: pd.DataFrame, x: list[str]) -> go.Figure:
+    fig = go.Figure()
+    for name in ["Exceed SLA", "Meet SLA"]:
+        fig.add_trace(go.Scatter(
+            x=x, y=ct[name], name=name, mode="lines+text", stackgroup="sla", line=dict(width=0.5, color=SLA_COLORS[name]),
+            fillcolor=SLA_COLORS[name], text=_labels(ct[name]), textposition="middle center",
+            textfont=dict(size=10, color="#ffffff"), hovertemplate=f"<b>%{{x}}</b><br>{name}: %{{y:,}}<extra></extra>"))
+    fig.add_trace(go.Scatter(
+        x=x, y=ct["Grand Total"], name="Grand Total", mode="lines+markers+text", text=_labels(ct["Grand Total"]),
+        textposition="top center", textfont=dict(size=11, color=TEXT), line=dict(color="#5B8DD6", width=2.5),
+        marker=dict(size=7), cliponaxis=False, hovertemplate="<b>%{x}</b><br>Grand Total: %{y:,}<extra></extra>"))
+    dark(fig, 400)
+    fig.update_layout(hovermode="x unified", yaxis=dict(range=[0, (ct["Grand Total"].max() or 1) * 1.2]),
+                      xaxis=dict(showgrid=False))
+    return fig
+
+
+def stacked_groups(ct: pd.DataFrame, x: list[str], colors: dict) -> go.Figure:
+    fig = go.Figure()
+    for name in [c for c in ct.columns if c != "Grand Total"]:
+        fig.add_trace(go.Bar(x=x, y=ct[name], name=name, marker_color=colors.get(name),
+                             text=_labels(ct[name]), textposition="inside", insidetextanchor="middle",
+                             textfont=dict(size=10, color=TEXT if colors.get(name) == YELLOW else "#ffffff"),
+                             hovertemplate=f"<b>%{{x}}</b><br>{name}: %{{y:,}}<extra></extra>"))
+    fig.add_trace(go.Scatter(x=x, y=ct["Grand Total"], mode="text", text=_labels(ct["Grand Total"]),
+                             textposition="top center", textfont=dict(size=11, color=TEXT), showlegend=False,
+                             hoverinfo="skip"))
+    dark(fig, 400)
+    fig.update_layout(barmode="stack", uniformtext=dict(minsize=8, mode="hide"),
+                      yaxis=dict(range=[0, (ct["Grand Total"].max() or 1) * 1.15]), xaxis=dict(showgrid=False))
+    return fig
+
+
+def clustered_groups(ct: pd.DataFrame, x: list[str], colors: dict, total_line: bool = False,
+                     spline: bool = False) -> go.Figure:
+    fig = go.Figure()
+    series = [c for c in ct.columns if c != "Grand Total"]
+    for name in series:
+        fig.add_trace(go.Bar(x=x, y=ct[name], name=name, marker_color=colors.get(name),
+                             text=_labels(ct[name]), textposition="outside", textangle=0,
+                             textfont=dict(size=9 if len(series) > 2 else 10, color=TEXT_2), cliponaxis=False,
+                             hovertemplate=f"<b>%{{x}}</b><br>{name}: %{{y:,}}<extra></extra>"))
+    bar_max = float(ct[series].to_numpy().max() or 1)
+    dark(fig, 400)
+    fig.update_layout(barmode="group", bargroupgap=0.05,
+                      xaxis=dict(showgrid=False, tickangle=-30 if len(x) > 8 else 0))
+    if total_line:
+        tot = ct["Grand Total"]
+        fig.add_trace(go.Scatter(
+            x=x, y=tot, name="Grand Total", yaxis="y2", mode="lines+markers+text", text=_labels(tot),
+            textposition="top center", textfont=dict(size=11, color=GOLD), cliponaxis=False,
+            line=dict(color=YELLOW, width=3, shape="spline" if spline else "linear"), marker=dict(size=7),
+            hovertemplate="<b>%{x}</b><br>Grand Total: %{y:,}<extra></extra>"))
+        # Batang di bawah, garis total di atas, agar label tidak bertumpuk.
+        t_max = float(tot.max() or 1)
+        step = max(1, round(t_max / 2))
+        fig.update_layout(yaxis=dict(range=[0, bar_max * 1.8]),
+                          yaxis2=dict(overlaying="y", side="right", showgrid=False,
+                                      range=[-t_max * 0.9, t_max * 1.15], tickmode="array",
+                                      tickvals=[0, step, step * 2] if step * 2 <= t_max * 1.15 else [0, step],
+                                      tickfont=dict(color=GOLD)))
+    else:
+        fig.update_layout(yaxis=dict(range=[0, bar_max * 1.2]))
+    return fig
+
+
+def mttr_critical_table(df: pd.DataFrame) -> pd.DataFrame:
+    """Pivot Severity CRITICAL per GROUP: Count of Huawei TT, Sum of Aging Time, MTTR = Sum Aging ÷ TT
+    (rumus Excel =E118/D118). Berbeda dari mttr_table() yang memakai TT ÷ Aging."""
+    crit = df[df["_has_tt"] & (df["_sev"].str.upper() == "CRITICAL")]
+    g = crit.groupby("_grp").agg(tt=("_grp", "size"), aging=("_aging", "sum"))
+    g = g.reindex([x for x in GROUP_ORDER if x in g.index])
+    g = g.sort_values("tt", ascending=False)
+    g["mttr"] = g["aging"] / g["tt"].where(g["tt"] > 0)
+    g.index.name = "GROUP"
+    return g
+
+
+def mttr_critical_chart(g: pd.DataFrame) -> go.Figure:
+    if g.empty:
+        return empty_fig("Tidak ada TT CRITICAL pada filter ini.", 400)
+    fig = go.Figure()
+    fig.add_trace(go.Bar(x=list(g.index), y=g["tt"], name="TT Critical Access Issue",
+                         marker_color=[GROUP_COLORS.get(i, PURPLE) for i in g.index], text=_labels(g["tt"]),
+                         textposition="inside", insidetextanchor="end",
+                         textfont=dict(size=11, color="#ffffff"),
+                         hovertemplate="<b>%{x}</b><br>TT Critical: %{y:,}<extra></extra>"))
+    fig.add_trace(go.Scatter(x=list(g.index), y=g["mttr"], name="MTTR (hari)", yaxis="y2",
+                             mode="lines+markers+text", text=[days(v) for v in g["mttr"]], textposition="top center",
+                             textfont=dict(size=11, color=ORANGE), line=dict(color=ORANGE, width=3, shape="spline"),
+                             marker=dict(size=8), cliponaxis=False,
+                             hovertemplate="<b>%{x}</b><br>MTTR: %{y:.2f} hari<extra></extra>"))
+    dark(fig, 400)
+    fig.update_layout(yaxis=dict(range=[0, (g["tt"].max() or 1) * 1.15], title="TT"),
+                      yaxis2=dict(overlaying="y", side="right", showgrid=False, rangemode="tozero",
+                                  range=[0, (g["mttr"].max() or 1) * 1.25], title="MTTR (hari)",
+                                  tickfont=dict(color=ORANGE)),
+                      xaxis=dict(showgrid=False))
+    return fig
+
+
+def _cw_key(cw: str) -> tuple[int, int]:
+    m = re.match(r"(\d{4})\D*CW\s*(\d+)", str(cw), flags=re.I)
+    return (int(m.group(1)), int(m.group(2))) if m else (0, 0)
 
 
 def chart_card(key: str, badge: str, color: str, title: str, fig, exports: list | None = None,
@@ -1226,7 +1367,7 @@ with head_r:
     xlsx_slot = b3.empty()
     ppt_slot = b4.empty()
     if b5.button("↻ Reset Filter", width="stretch"):
-        for k in [k for k in st.session_state if str(k).startswith(FILTER_KEYS) or k in ("ae_range", "target_tlp", "g1_owner", "g4_owner")]:
+        for k in [k for k in st.session_state if str(k).startswith(FILTER_KEYS) or k in ("ae_range", "target_tlp", "g1_owner", "g4_owner", "rpt_weeks")]:
             st.session_state.pop(k, None)
         st.rerun()
 
@@ -1420,7 +1561,8 @@ def insights(d: pd.DataFrame) -> list[tuple[str, str, str]]:
 
 EXPORTS: list[dict] = []                # angka tiap grafik (untuk Export Excel & PPT)
 EXTRA_TABLES: dict[str, pd.DataFrame] = {}  # tabel perhitungan pendukung (hanya Excel)
-tabs = st.tabs(["📊 Executive Summary", "📈 Trend A–E", "⏱️ MTTR", "🏢 Jumlah TT", "🔎 Root Cause",
+tabs = st.tabs(["📊 Executive Summary", "📅 Report TT Access", "📈 Trend A–E", "⏱️ MTTR", "🏢 Jumlah TT",
+                "🔎 Root Cause",
                 f"🗂️ Data Explorer ({fmt(len(d))} TT)"])
 
 # ---------- Executive Summary ----------
@@ -1532,8 +1674,81 @@ with tabs[0]:
     with b:
         chart_card("cause", "PVT-4", RED, "Top Cause · Problem Type", ranked(access_rc, "_cause", 10, MAGENTA), EXPORTS)
 
-# ---------- Trend A–E ----------
+# ---------- Report TT Access (weekly & monthly, mengikuti pivot Excel) ----------
 with tabs[1]:
+    if "Access Issue" not in prepared:
+        st.info("Sheet List Access Issue tidak tersedia.")
+    else:
+        # Case Status Open & Closed (Cancel tidak dihitung) + filter global; bulan dipakai hanya untuk monthly.
+        rpt = apply_filters(prepared["Access Issue"], {**FILTERS, "status": FILTERS["status"] or ["Open", "Closed"]},
+                            month=False)
+        section("Weekly Report")
+        weeks_all = sorted([w for w in rpt["_cw"].unique() if w], key=_cw_key)
+        sel_weeks = st.multiselect("Week (CW Open)", weeks_all[::-1], default=weeks_all[-12:][::-1], key="rpt_weeks",
+                                   placeholder="Pilih minggu…")
+        weeks = sorted(sel_weeks, key=_cw_key)
+        if not weeks:
+            st.info("Pilih minimal satu minggu.")
+        else:
+            wk = rpt[rpt["_cw"].isin(weeks)]
+            one_year = len({_cw_key(w)[0] for w in weeks}) == 1
+            x_w = [f"CW{_cw_key(w)[1]}" if one_year else w for w in weeks]
+            a, b = st.columns(2)
+            with a:
+                ct_sla = pivot_tt(wk, "_cw", "_sla", weeks, ["Exceed SLA", "Meet SLA"])
+                chart_card("rpt_sla", "WEEKLY", MAGENTA, "TT Access based On SLA", sla_area(ct_sla, x_w), EXPORTS,
+                           table=ct_sla.rename_axis("CW Open"))
+            with b:
+                ct_tlp_w = pivot_tt(wk, "_cw", "_grp", weeks, GROUP_ORDER)
+                chart_card("rpt_tlp_w", "WEEKLY", TOSCA, "TT Access Based on TLP",
+                           stacked_groups(ct_tlp_w, x_w, GROUP_COLORS), EXPORTS, table=ct_tlp_w.rename_axis("CW Open"))
+
+        st.divider()
+        section("Monthly Report")
+        mon = rpt if FILTERS["years"] else rpt[rpt["_year"] == rpt["_year"].max()]
+        if FILTERS["months"]:
+            mon = mon[mon["_month"].isin(FILTERS["months"])]
+        periods = sorted(mon["_period"].unique())
+        if not periods:
+            st.info("Tidak ada data bulanan pada filter ini.")
+        else:
+            mlabels = [p.strftime("%b_%Y") for p in periods]
+            span = f"{mlabels[0].split('_')[0]} - {mlabels[-1].replace('_', ' ')}"
+            a, b = st.columns(2)
+            with a:
+                ct_sev = pivot_tt(mon.assign(_sev_u=mon["_sev"].str.upper()), "_period", "_sev_u", periods,
+                                  ["CRITICAL", "MAJOR"])
+                chart_card("rpt_sev", "MONTHLY", MAGENTA, f"TT Access based on Severity · {span}",
+                           clustered_groups(ct_sev, mlabels, SEV_COLORS, total_line=True), EXPORTS,
+                           table=ct_sev.set_axis(mlabels).rename_axis("Month Open"))
+            with b:
+                ct_hub = pivot_tt(mon, "_period", "_sitecat", periods, ["BIG HUB SITE", "MEDIUM HUB SITE"])
+                chart_card("rpt_hub", "MONTHLY", TOSCA, f"TT Access based on Hub Site · {span}",
+                           clustered_groups(ct_hub, mlabels, HUB_COLORS, total_line=True, spline=True), EXPORTS,
+                           table=ct_hub.set_axis(mlabels).rename_axis("Month Open"))
+            a, b = st.columns(2)
+            with a:
+                ct_tlp_m = pivot_tt(mon, "_period", "_grp", periods, GROUP_ORDER)
+                chart_card("rpt_tlp_m", "MONTHLY", YELLOW, f"TT Access based on TLP · {span}",
+                           clustered_groups(ct_tlp_m, mlabels, GROUP_COLORS), EXPORTS,
+                           table=ct_tlp_m.set_axis(mlabels).rename_axis("Month Open"))
+            with b:
+                mt_crit = mttr_critical_table(mon)
+                chart_card("rpt_mttr", "MONTHLY", ORANGE, f"TT Access based on MTTR · {span} (CRITICAL)",
+                           mttr_critical_chart(mt_crit), EXPORTS,
+                           table=mt_crit.rename(columns={"tt": "TT Critical Access Issue",
+                                                         "aging": "Sum of Aging Time", "mttr": "MTTR"}))
+            with st.expander("Tabel MTTR CRITICAL per GROUP"):
+                st.dataframe(mt_crit.rename(columns={"tt": "Count of Huawei TT", "aging": "Sum of Aging Time",
+                                                     "mttr": "MTTR (Sum Aging ÷ TT)"}), width="stretch",
+                             column_config={"Sum of Aging Time": st.column_config.NumberColumn(format="%.2f"),
+                                            "MTTR (Sum Aging ÷ TT)": st.column_config.NumberColumn(format="%.2f")})
+            st.caption("Semua grafik: Count of Huawei TT, Case Status Open & Closed. Monthly memakai Year Open terbaru "
+                       "(atau tahun di filter). MTTR di grafik ini = Sum of Aging Time ÷ Count of Huawei TT per GROUP "
+                       "untuk Severity CRITICAL (rumus Excel =E118/D118).")
+
+# ---------- Trend A–E ----------
+with tabs[2]:
     months_sel = sorted(dim["_period"].unique())
     labels_m = [p.strftime("%b_%Y") for p in months_sel]
     if labels_m:
@@ -1554,7 +1769,7 @@ with tabs[1]:
         st.info("Tidak ada data bulan untuk filter ini.")
 
 # ---------- MTTR ----------
-with tabs[2]:
+with tabs[3]:
     chart_card("mttr_tlp2", "MTTR", YELLOW, "MTTR per ToCo · Count Huawei TT ÷ Sum Aging (Days)",
                mttr_group(access_f, 400))
     with st.expander("Tabel MTTR per ToCo"):
@@ -1574,7 +1789,7 @@ with tabs[2]:
         chart_card("mttr_cause", "MTTR", MAGENTA, "Average MTTR (Days) per Cause", mttr_by(d, "_cause"))
 
 # ---------- Jumlah TT ----------
-with tabs[3]:
+with tabs[4]:
     sites_f = SITES
     if f_region:
         sites_f = sites_f[sites_f["_region"].isin(f_region)]
@@ -1605,7 +1820,7 @@ with tabs[3]:
         chart_card("tlp_sev", "SEV", TOSCA, "Jumlah TT per Severity", ranked(d, "_sev", 8, TOSCA, 300))
 
 # ---------- Root Cause ----------
-with tabs[4]:
+with tabs[5]:
     a, b = st.columns(2)
     with a:
         chart_card("root_pie", "TOP 5", GOLD, "The Root Cause · Top 5 (kolom Case)", root_cause_pie(access_rc, 440))
@@ -1630,7 +1845,7 @@ with tabs[4]:
                "Top Cause & Pareto Cause dihitung dari kolom **Problem Type** di sheet List Access Issue.")
 
 # ---------- Data Explorer ----------
-with tabs[5]:
+with tabs[6]:
     preferred = []
     for c in cats:
         cfg = CATEGORIES[c]
