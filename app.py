@@ -48,6 +48,26 @@ from pyxlsb import open_workbook  # noqa: E402
 # Konstanta
 # =====================================================================================
 
+st.markdown(f"""
+<style>
+  .stApp {{background:#ffffff;}}
+  [data-testid="stHeader"] {{background: transparent;}}
+  .block-container {{padding-top: 1.1rem; padding-bottom: 2rem; max-width: 1640px;}}
+
+  /* --- TAMBAHKAN/PINDAHKAN BLOK INI KE ATAS --- */
+  #MainMenu {{visibility: hidden !important;}}
+  header {{visibility: hidden !important; display: none !important;}}
+  footer {{visibility: hidden !important; display: none !important;}}
+  .viewerBadge_container__1QSob {{display: none !important;}}
+  [data-testid="stStatusWidget"] {{visibility: hidden !important;}}
+  div[data-testid="stDecoration"] {{display: none !important;}}
+  /* ------------------------------------------- */
+
+  .hdr {{display:flex; align-items:center; gap:14px;}}
+  /* ... (lanjutan gaya CSS Anda) */
+</style>
+""", unsafe_allow_html=True)
+
 APP_DIR = Path(__file__).resolve().parent
 SHARED_DIR = APP_DIR / "shared_data"
 LATEST_FILE = SHARED_DIR / "latest_tlp_data.xlsb"
