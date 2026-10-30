@@ -2258,14 +2258,11 @@ elif ppt_slot.button("📑 Export PPT", width="stretch", help="Susun presentasi 
     except Exception as exc:  # data grafik tidak valid, dll.
         st.error(f"Gagal membuat PowerPoint: {exc}")
    
-hide_st_style = """
-<style>
-#MainMenu {visibility: hidden;}
-header {visibility: hidden;}
-footer {visibility: hidden;}
-.viewerBadge_container__1QSob {visibility: hidden;}
-[data-testid="stStatusWidget"] {visibility: hidden;}
-#stDecoration {display: none;}
-</style>
-"""
-st.markdown(hide_st_style, unsafe_allow_html=True)
+st.markdown("""
+    <style>
+    /* Menyembunyikan logo/ikon pojok kanan bawah */
+    div[data-testid="stDecoration"] {visibility: hidden !important;}
+    footer {visibility: hidden !important;}
+    .viewerBadge_container__1QSob {display: none !important;}
+    </style>
+""", unsafe_allow_html=True)
