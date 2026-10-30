@@ -1167,10 +1167,13 @@ def k1_chart(t: pd.DataFrame) -> go.Figure:
                          hovertemplate="<b>%{x}</b><br>Total site K1: %{y:,}<extra></extra>"))
     has_pm = (t["NY PM / Walktest"].sum() + t["Done PM / Walktest"].sum()) > 0
     if has_pm:
+        # Warna titik & label mengikuti skala conditional tabel (0% merah -> 50% kuning -> 100% hijau).
+        ach_colors = [_scale_color(v) for v in main["Achievement (%)"]]
         fig.add_trace(go.Scatter(x=x, y=main["Achievement (%)"], name="Achievement", yaxis="y2",
-                                 mode="lines+markers+text", text=[pct(v, 1) for v in main["Achievement (%)"]],
-                                 textposition="top center", textfont=dict(size=10, color=GOLD), cliponaxis=False,
-                                 line=dict(color=YELLOW, width=2.5), marker=dict(size=7),
+                                 mode="lines+markers+text", text=[pct(v, 2) for v in main["Achievement (%)"]],
+                                 textposition="top center", textfont=dict(size=10, color=TEXT), cliponaxis=False,
+                                 line=dict(color="#8a8fa8", width=2),
+                                 marker=dict(size=13, color=ach_colors, line=dict(color="#ffffff", width=1.5)),
                                  hovertemplate="<b>%{x}</b><br>Achievement: %{y:.2f}%<extra></extra>"))
     dark(fig, 420)
     fig.update_layout(yaxis=dict(range=[0, float(main["Total site K1"].max() or 1) * (2.0 if has_pm else 1.18)]),
