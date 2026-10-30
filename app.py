@@ -911,6 +911,7 @@ def stacked_groups(ct: pd.DataFrame, x: list[str], colors: dict) -> go.Figure:
     for name in [c for c in ct.columns if c != "Grand Total"]:
         fig.add_trace(go.Bar(x=x, y=ct[name], name=name, marker_color=colors.get(name),
                              text=_labels(ct[name]), textposition="inside", insidetextanchor="middle",
+                             textangle=0,  # selalu mendatar; label yang tidak muat disembunyikan (uniformtext)
                              textfont=dict(size=10, color=TEXT if colors.get(name) == YELLOW else "#ffffff"),
                              hovertemplate=f"<b>%{{x}}</b><br>{name}: %{{y:,}}<extra></extra>"))
     fig.add_trace(go.Scatter(x=x, y=ct["Grand Total"], mode="text", text=_labels(ct["Grand Total"]),
@@ -973,7 +974,7 @@ def mttr_critical_chart(g: pd.DataFrame) -> go.Figure:
     fig = go.Figure()
     fig.add_trace(go.Bar(x=list(g.index), y=g["tt"], name="TT Critical Access Issue",
                          marker_color=[GROUP_COLORS.get(i, PURPLE) for i in g.index], text=_labels(g["tt"]),
-                         textposition="inside", insidetextanchor="end",
+                         textposition="inside", insidetextanchor="end", textangle=0,
                          textfont=dict(size=11, color="#ffffff"),
                          hovertemplate="<b>%{x}</b><br>TT Critical: %{y:,}<extra></extra>"))
     fig.add_trace(go.Scatter(x=list(g.index), y=g["mttr"], name="MTTR (hari)", yaxis="y2",
