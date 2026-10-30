@@ -13,7 +13,7 @@ baseRadius = "medium"
 backgroundColor = "#f7f8fb"
 
 [client]
-toolbarMode = "hide"
+toolbarMode = "minimal"
 
 [server]
 runOnSave = true
