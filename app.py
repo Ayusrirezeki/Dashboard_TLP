@@ -908,17 +908,21 @@ def sla_area(ct: pd.DataFrame, x: list[str]) -> go.Figure:
 
 def stacked_groups(ct: pd.DataFrame, x: list[str], colors: dict) -> go.Figure:
     fig = go.Figure()
+    base = pd.Series(0, index=ct.index)
     for name in [c for c in ct.columns if c != "Grand Total"]:
         fig.add_trace(go.Bar(x=x, y=ct[name], name=name, marker_color=colors.get(name),
-                             text=_labels(ct[name]), textposition="inside", insidetextanchor="middle",
-                             textangle=0,  # selalu mendatar; label yang tidak muat disembunyikan (uniformtext)
-                             textfont=dict(size=10, color=TEXT if colors.get(name) == YELLOW else "#ffffff"),
                              hovertemplate=f"<b>%{{x}}</b><br>{name}: %{{y:,}}<extra></extra>"))
+        # Label ditulis sebagai teks terpisah di tengah tiap potongan: selalu tampil & mendatar,
+        # termasuk potongan kecil yang tidak muat untuk label bawaan batang.
+        fig.add_trace(go.Scatter(x=x, y=base + ct[name] / 2, mode="text", text=_labels(ct[name]),
+                                 textposition="middle center", showlegend=False, hoverinfo="skip",
+                                 textfont=dict(size=10, color=TEXT if _light(colors.get(name, "")) else "#ffffff")))
+        base = base + ct[name]
     fig.add_trace(go.Scatter(x=x, y=ct["Grand Total"], mode="text", text=_labels(ct["Grand Total"]),
                              textposition="top center", textfont=dict(size=11, color=TEXT), showlegend=False,
                              hoverinfo="skip"))
-    dark(fig, 400)
-    fig.update_layout(barmode="stack", uniformtext=dict(minsize=8, mode="hide"),
+    dark(fig, 440)
+    fig.update_layout(barmode="stack", bargap=0.18,
                       yaxis=dict(range=[0, (ct["Grand Total"].max() or 1) * 1.15]), xaxis=dict(showgrid=False))
     return fig
 
