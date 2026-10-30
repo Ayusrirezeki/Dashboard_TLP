@@ -31,15 +31,6 @@ import streamlit as st
 st.set_page_config(page_title="TLP Dashboard", page_icon="📊", layout="wide",
                    initial_sidebar_state="collapsed")
 
-st.markdown("""
-    <style>
-    /* Menyembunyikan logo/ikon pojok kanan bawah */
-    div[data-testid="stDecoration"] {visibility: hidden !important;}
-    footer {visibility: hidden !important;}
-    .viewerBadge_container__1QSob {display: none !important;}
-    </style>
-""", unsafe_allow_html=True)
-
 import html  # noqa: E402
 import io  # noqa: E402
 import json  # noqa: E402
